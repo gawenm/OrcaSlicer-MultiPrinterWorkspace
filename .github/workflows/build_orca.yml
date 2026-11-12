@@ -585,6 +585,23 @@ jobs:
             exit 1
           }
 
+      - name: Smoke-test MPW Windows installer
+        if: runner.os == 'Windows' && github.repository == 'gawenm/OrcaSlicer-MultiPrinterWorkspace' && !vars.SELF_HOSTED
+        timeout-minutes: 10
+        shell: pwsh
+        run: |
+          $installers = @(Get-ChildItem "$env:BUILD_DIR/OrcaSlicer_Windows_Installer_*.exe")
+          if ($installers.Count -ne 1) { throw "Expected exactly one Windows installer." }
+
+          $installed = Join-Path $env:RUNNER_TEMP 'mpw-install-test'
+          $result = Start-Process -Wait -PassThru -FilePath $installers[0].FullName -ArgumentList '/S', "/D=$installed"
+          if ($result.ExitCode -ne 0) { throw "Installer exited with code $($result.ExitCode)." }
+          foreach ($file in 'orca-slicer.exe', 'Uninstall.exe') {
+            if (-not (Test-Path -LiteralPath (Join-Path $installed $file) -PathType Leaf)) {
+              throw "Missing installed file: $file"
+            }
+          }
+
       # Checks the shipped files, the installer, the payload inside it (7-Zip unpacks NSIS
       # installers) and the uninstaller a silent install writes.
       - name: Verify Windows signatures
