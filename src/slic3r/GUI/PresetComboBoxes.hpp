@@ -80,6 +80,11 @@ public:
     // and next internal selection was accomplished
     bool selection_is_changed_according_to_physical_printers();
 
+    void set_plate_choices(const std::vector<std::string>& names, const std::string& current,
+                           std::function<void(const std::string&)> on_select);
+    void clear_plate_choices();
+    bool has_plate_choices() const { return bool(m_select_plate_preset); }
+
     void update(std::string select_preset);
     // select preset which is selected in PreseBundle
     void update_from_bundle();
@@ -156,6 +161,7 @@ protected:
 
     PrinterTechnology printer_technology {ptAny};
 
+    bool select_plate_choice(wxCommandEvent& event);
     void invalidate_selection();
     void validate_selection(bool predicate = false);
     void update_selection();
@@ -182,6 +188,7 @@ protected:
     wxBitmap *get_bmp(Preset const &preset);
 
 private:
+    std::function<void(const std::string&)> m_select_plate_preset;
     void fill_width_height();
 };
 

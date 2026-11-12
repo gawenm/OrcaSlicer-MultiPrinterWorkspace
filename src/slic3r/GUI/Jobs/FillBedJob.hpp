@@ -31,6 +31,10 @@ class FillBedJob : public Job
     Plater *m_plater;
 
     bool m_instances;
+    bool m_grouped_layout = false;
+    int m_plate_index = -1;
+    size_t m_template_instance = 0;
+    DynamicPrintConfig m_plate_config;
 
 public:
 

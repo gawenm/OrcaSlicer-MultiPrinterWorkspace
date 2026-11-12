@@ -75,6 +75,18 @@ struct PlateMixedFilamentInfo
     std::string components;    // 1-based physical component ids, comma separated, e.g. "1,3"
 };
 
+// A project-local FFF configuration, including printer, process and filament settings.
+// An empty configuration inherits the project's ordinary presets.
+struct PlatePrinterProfile
+{
+    DynamicPrintConfig config;
+    bool is_bambu = false;
+
+    bool assigned() const { return !config.empty(); }
+    bool valid() const;
+    void remove_local_settings();
+};
+
 //BBS: define plate data list related structures
 struct PlateData
 {
@@ -122,6 +134,8 @@ struct PlateData
     std::vector<PlateMixedFilamentInfo> mixed_filaments_info;
     std::vector<size_t> skipped_objects;
     DynamicPrintConfig config;
+    PlatePrinterProfile printer_profile;
+    std::optional<Vec2d> printer_profile_origin;
     bool            is_support_used {false};
     bool            is_sliced_valid = false;
     bool            toolpath_outside {false};

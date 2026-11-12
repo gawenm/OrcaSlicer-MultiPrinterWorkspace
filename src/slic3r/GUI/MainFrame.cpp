@@ -2224,6 +2224,9 @@ wxString print_select_type_label(MainFrame::PrintSelectType type)
 
 std::vector<MainFrame::PrintSelectType> MainFrame::available_print_actions() const
 {
+    if (m_plater && m_plater->get_partplate_list().has_printer_profiles())
+        return {ePrintPlate, eExportGcode};
+
     std::vector<PrintSelectType> actions;
     const auto preset_bundle      = wxGetApp().preset_bundle;
     const bool use_printer_agents = wxGetApp().app_config->get_bool("use_printer_agents");
@@ -2713,6 +2716,10 @@ void MainFrame::update_side_button_style()
 
 void MainFrame::update_slice_print_status(SlicePrintEventType event, bool can_slice, bool can_print)
 {
+    if (m_plater && m_plater->get_partplate_list().has_printer_profiles() &&
+        m_print_select != ePrintPlate && m_print_select != eExportGcode)
+        set_print_button_to_default(ePrintPlate);
+
     bool enable_print = true, enable_slice = true;
 
     if (!can_slice)

@@ -492,7 +492,7 @@ public:
 	void            update_saved_preset_from_current_preset();
     void            update_pages_with_multi_variant();
 
-	DynamicPrintConfig*	get_config() { return m_config; }
+	virtual DynamicPrintConfig* get_config() { return m_config; }
     PresetCollection *  get_presets() { return m_presets; }
     TabPresetComboBox *  get_combo_box() { return m_presets_choice; }
 
@@ -580,7 +580,12 @@ public:
         Tab(parent, _(L("Process")), type) {}
 	~TabPrint() {}
 
-	void		build() override;
+	void        set_plate_process_config(const DynamicPrintConfig* config, bool is_bambu = false);
+    bool        has_plate_process_config() const { return bool(m_plate_process_config); }
+    bool        apply_plate_process_change(const std::string& key);
+    const Preset* plate_process_preset() const;
+    DynamicPrintConfig* get_config() override { return m_plate_process_config ? m_plate_process_config.get() : m_config; }
+    void        build() override;
 	void		reload_config() override;
 	void		update_description_lines() override;
 	void		toggle_options() override;
@@ -592,6 +597,9 @@ public:
 	int			extruder_variant_index(int extruder_id, NozzleVolumeType nozzle_type);
 
 private:
+    std::unique_ptr<DynamicPrintConfig> m_plate_process_config;
+    bool m_plate_is_bambu = false;
+    bool m_refreshing_plate_process = false;
 	ogStaticText*	m_recommended_thin_wall_thickness_description_line = nullptr;
 	ogStaticText*	m_top_bottom_shell_thickness_explanation = nullptr;
 };

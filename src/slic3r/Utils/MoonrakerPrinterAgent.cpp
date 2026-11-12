@@ -482,6 +482,16 @@ int MoonrakerPrinterAgent::start_local_print(PrintParams params, OnUpdateStatusF
     if (cancel_fn && cancel_fn()) {
         return BAMBU_NETWORK_ERR_CANCELED;
     }
+
+    std::string base_url;
+    std::string api_key;
+    {
+        std::lock_guard<std::recursive_mutex> lock(connect_mutex);
+        if (!params.dev_id.empty() && params.dev_id != device_info.dev_id)
+            return BAMBU_NETWORK_ERR_INVALID_HANDLE;
+        base_url = device_info.base_url;
+        api_key = device_info.api_key;
+    }
     // Determine the G-code file to upload
     // params.filename may be .3mf, params.dst_file contains actual G-code
     std::string gcode_path = params.filename;
@@ -506,7 +516,7 @@ int MoonrakerPrinterAgent::start_local_print(PrintParams params, OnUpdateStatusF
     // Upload file
     if (update_fn)
         update_fn(PrintingStageUpload, 0, _u8L("Uploading G-code..."));
-    if (!upload_gcode(file.path(), upload_filename, device_info.base_url, device_info.api_key, update_fn, cancel_fn)) {
+    if (!upload_gcode(file.path(), upload_filename, base_url, api_key, update_fn, cancel_fn)) {
         return BAMBU_NETWORK_ERR_PRINT_LP_UPLOAD_FTP_FAILED;
     }
 
@@ -517,7 +527,7 @@ int MoonrakerPrinterAgent::start_local_print(PrintParams params, OnUpdateStatusF
 
     if (update_fn)
         update_fn(PrintingStageSending, 0, _u8L("Starting print..."));
-    if (!print_uploaded_file(params, upload_filename)) {
+    if (!print_uploaded_file(params, upload_filename, base_url, api_key)) {
         return BAMBU_NETWORK_ERR_PRINT_LP_PUBLISH_MSG_FAILED;
     }
 
@@ -526,10 +536,11 @@ int MoonrakerPrinterAgent::start_local_print(PrintParams params, OnUpdateStatusF
     return BAMBU_NETWORK_SUCCESS;
 }
 
-bool MoonrakerPrinterAgent::print_uploaded_file(const PrintParams& /*params*/, const std::string& filename)
+bool MoonrakerPrinterAgent::print_uploaded_file(const PrintParams& /*params*/, const std::string& filename,
+                             const std::string& base_url, const std::string& api_key)
 {
     // Start print via gcode script (simpler than JSON-RPC); quoted so spaces and apostrophes stay part of the name
-    return send_gcode_sync(device_info.dev_id, "SDCARD_PRINT_FILE FILENAME=\"" + filename + "\"");
+    return send_gcode_sync(base_url, api_key, "SDCARD_PRINT_FILE FILENAME=\"" + filename + "\"");
 }
 
 bool MoonrakerPrinterAgent::accepts_3mf() const
@@ -1441,7 +1452,7 @@ void MoonrakerPrinterAgent::send_gcode_async(const std::string& dev_id, const st
         .perform();
 }
 
-bool MoonrakerPrinterAgent::send_gcode_sync(const std::string& dev_id, const std::string& gcode) const
+bool MoonrakerPrinterAgent::send_gcode_sync(const std::string& base_url, const std::string& api_key, const std::string& gcode) const
 {
     nlohmann::json payload;
     payload["script"]       = gcode;
@@ -1451,9 +1462,9 @@ bool MoonrakerPrinterAgent::send_gcode_sync(const std::string& dev_id, const std
     bool        success = false;
     std::string http_error;
 
-    auto http = Http::post(join_url(device_info.base_url, "/printer/gcode/script"));
-    if (!device_info.api_key.empty()) {
-        http.header("X-Api-Key", device_info.api_key);
+    auto http = Http::post(join_url(base_url, "/printer/gcode/script"));
+    if (!api_key.empty()) {
+        http.header("X-Api-Key", api_key);
     }
     http.header("Content-Type", "application/json")
         .set_post_body(payload_str)

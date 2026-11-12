@@ -13,6 +13,7 @@
 #include "DeviceErrorDialog.hpp"
 #include "MainFrame.hpp"
 #include "Plater.hpp"
+#include "PlatePrintContext.hpp"
 #include "ReleaseNote.hpp"
 #include <string>
 #include <boost/log/trivial.hpp>
@@ -2697,8 +2698,18 @@ int MachineObject::connect()
     std::string host = Http::get_host_from_url(input, &port);
     std::string ca_file;
 
+    const DynamicPrintConfig* host_config = nullptr;
     if (wxTheApp && GUI::wxGetApp().preset_bundle) {
-        const auto& config = GUI::wxGetApp().preset_bundle->printers.get_edited_preset().config;
+        auto& app = GUI::wxGetApp();
+        const auto* plate = GUI::selected_print_plate(app.plater());
+        host_config = GUI::plate_print_host_config(plate, *app.preset_bundle);
+        if (host_config && plate && plate->printer_profile().assigned() &&
+            dev_id_from_address(host_config->opt_string("print_host"), host_config->opt_string("printhost_port")) != get_dev_id())
+            host_config = nullptr;
+    }
+
+    if (host_config) {
+        const auto& config = *host_config;
         if (port.empty())
             port = config.opt_string("printhost_port");
         ca_file = config.opt_string("printhost_cafile");

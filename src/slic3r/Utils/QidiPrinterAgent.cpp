@@ -1,3 +1,4 @@
+#include "slic3r/GUI/I18N.hpp"
 #include "QidiPrinterAgent.hpp"
 #include "Http.hpp"
 #include "MoonrakerPrinterAgent.hpp"
@@ -120,16 +121,17 @@ std::string QidiPrinterAgent::build_tool_slot_script(const std::string& ams_mapp
     return script;
 }
 
-bool QidiPrinterAgent::print_uploaded_file(const PrintParams& params, const std::string& filename)
+bool QidiPrinterAgent::print_uploaded_file(const PrintParams& params, const std::string& filename,
+                             const std::string& base_url, const std::string& api_key)
 {
     const std::string script = build_tool_slot_script(params.ams_mapping);
-    if (!script.empty() && !send_gcode_sync(device_info.dev_id, script)) {
+    if (!script.empty() && !send_gcode_sync(base_url, api_key, script)) {
         return false;
     }
 
     // On the X-Max 4 and Q2, Klipper only opens the copy Moonraker's print start makes, so SDCARD_PRINT_FILE can't find the upload
     std::string response;
-    return send_jsonrpc_command(device_info.base_url, device_info.api_key, print_start_request(params, filename), response);
+    return send_jsonrpc_command(base_url, api_key, print_start_request(params, filename), response);
 }
 
 nlohmann::json QidiPrinterAgent::print_start_request(const PrintParams& params, const std::string& filename)

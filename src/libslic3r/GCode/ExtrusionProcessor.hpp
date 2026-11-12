@@ -608,7 +608,7 @@ public:
                 t           = std::clamp(t, 0.0f, 1.0f);
                 final_speed = (1.0f - t) * speed_sections[section_idx].second + t * speed_sections[section_idx + 1].second;
             }
-            return round(final_speed);
+            return std::round(final_speed);
         };
 
         // ORCA: The speed sections are built from ext_perimeter_speed, which can be above the speed this path prints at

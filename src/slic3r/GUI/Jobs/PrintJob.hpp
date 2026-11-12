@@ -4,6 +4,7 @@
 #include <boost/filesystem/path.hpp>
 #include <boost/filesystem/operations.hpp>
 #include <functional>
+#include <memory>
 #include <string>
 #include <wx/string.h>
 #include <exception>
@@ -13,6 +14,8 @@
 #include "slic3r/GUI/DeviceCore/DevStorage.h" 
 
 namespace Slic3r {
+class IPrinterAgent;
+
 namespace GUI {
 
 class Plater;
@@ -54,6 +57,7 @@ class PrintJob : public Job
     std::function<void()> m_enter_ip_address_fun_fail{ nullptr };
     std::function<void()> m_enter_ip_address_fun_success{ nullptr };
     Plater *m_plater;
+    std::shared_ptr<IPrinterAgent> m_printer_agent;
 
 public:
     PrintPrepareData job_data;

@@ -173,6 +173,7 @@ class Sidebar : public wxPanel
     SyncAmsInfoDialog*                      m_sync_dlg{nullptr};
 
     void update_sync_ams_btn_enable(wxUpdateUIEvent &e);
+    void refresh_printer_controls(PresetBundle& bundle, const DynamicPrintConfig* plate_config = nullptr, bool is_bambu = false);
 
 public:
     enum DockingState
@@ -191,9 +192,10 @@ public:
     void on_leave_image_printer_bed(wxMouseEvent &evt);
     void on_change_color_mode(bool is_dark);
     void create_printer_preset();
-    void init_filament_combo(PlaterPresetComboBox **combo, const int filament_idx);
+    void init_filament_combo(PlaterPresetComboBox **combo, int filament_idx, bool plate_local = false);
     void remove_unused_filament_combos(const size_t current_extruder_count);
     void update_all_preset_comboboxes();
+    void refresh_plate_presets(bool preset_catalog_changed = false);
     //void update_partplate(PartPlateList& list);
     void update_presets(Slic3r::Preset::Type preset_type);
     //BBS
@@ -632,6 +634,10 @@ public:
     void print_job_finished(wxCommandEvent &evt);
     void send_job_finished(wxCommandEvent& evt);
     void open_platesettings_dialog(wxCommandEvent& evt);
+    void set_plate_bed_type(BedType type);
+    void set_plate_preset(Preset::Type type, const std::string& name, size_t slot = 0);
+    void set_plate_process_option(const std::string& key, const ConfigOption& value);
+    void change_plate_filament_count(int change);
     void open_filament_map_setting_dialog(wxCommandEvent &evt);
     void on_change_color_mode(SimpleEvent& evt);
 	void eject_drive();

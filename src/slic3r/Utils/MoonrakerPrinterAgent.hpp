@@ -132,7 +132,8 @@ protected:
                                    std::string&                 error,
                                    const std::function<bool()>& cancelled) const;
     // Starts the print of a file already uploaded to the gcodes root
-    virtual bool print_uploaded_file(const PrintParams& params, const std::string& filename);
+    virtual bool print_uploaded_file(const PrintParams& params, const std::string& filename,
+                             const std::string& base_url, const std::string& api_key);
     // Whether the printer prints a .gcode.3mf bundle as is (its use_3mf option)
     virtual bool accepts_3mf() const;
     void start_status_stream(const std::string& dev_id, const std::string& base_url, const std::string& api_key);
@@ -146,7 +147,7 @@ protected:
     std::string normalize_base_url(bool use_ssl, const std::string& host, const std::string& port);
     std::string sanitize_filename(const std::string& filename);
     std::string join_url(const std::string& base_url, const std::string& path) const;
-    bool send_gcode_sync(const std::string& dev_id, const std::string& gcode) const;
+    bool send_gcode_sync(const std::string& base_url, const std::string& api_key, const std::string& gcode) const;
     // Posts the request to /printer/print/start
     bool send_jsonrpc_command(const std::string& base_url, const std::string& api_key,
                               const nlohmann::json& request, std::string& response) const;

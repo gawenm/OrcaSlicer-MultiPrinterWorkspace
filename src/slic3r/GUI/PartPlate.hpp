@@ -47,6 +47,8 @@
 #include "MeshUtils.hpp"
 #include "libslic3r/ParameterUtils.hpp"
 
+namespace Slic3r { class PresetBundle; }
+
 class GLUquadric;
 typedef class GLUquadric GLUquadricObject;
 
@@ -209,6 +211,7 @@ private:
 
     // BBS
     DynamicPrintConfig m_config;
+    PlatePrinterProfile m_printer_profile;
 
     // SoftFever
     // part plate name
@@ -247,7 +250,7 @@ private:
     void refresh_imex_icon();
     float icon_scale_factor() const;
     void calc_vertex_for_number(int index, bool one_number, GLModel &buffer);
-    void calc_vertex_for_plate_name_edit_icon(GLTexture *texture, int index, PickingModel &model);
+    void calc_vertex_for_plate_name_edit_icon(float name_width, PickingModel &model);
     void calc_vertex_for_icons(int index, PickingModel &model);
     void calc_vertex_for_imex_warn_badge(int imex_icon_index, GLModel &model);
     // void calc_vertex_for_icons_background(int icon_count, GLModel &buffer);
@@ -338,6 +341,12 @@ public:
     void reset_skirt_start_angle();
 
     DynamicPrintConfig* config() { return &m_config; }
+    const PlatePrinterProfile& printer_profile() const { return m_printer_profile; }
+    DynamicPrintConfig build_print_config(PresetBundle& bundle) const;
+    void set_printer_profile(PlatePrinterProfile profile, bool reset_machine_overrides = true);
+    double printable_height() const { return m_height; }
+    void update_model_print_volume_state();
+    std::string printer_profile_slice_error();
 
     // set print sequence per plate
     //bool print_seq_same_global = true;
@@ -470,7 +479,7 @@ public:
     Vec3d get_center_origin();
     /* size and position related functions*/
     //set position and size
-    void set_pos_and_size(Vec3d& origin, int width, int depth, double height, bool with_instance_move, bool do_clear = true);
+    void set_pos_and_size(Vec3d& origin, int width, int depth, double height, bool with_instance_move, bool do_clear = true, bool center_on_resize = true);
 
     // BBS
     Vec2d get_size() const { return Vec2d(m_width, m_depth); }
@@ -584,7 +593,7 @@ public:
     bool contains(const Vec3d& point) const;
     bool contains(const GLVolume& v) const;
     bool contains(const BoundingBoxf3& bb) const;
-    bool intersects(const BoundingBoxf3& bb) const;
+    bool intersects(const BoundingBoxf3& bb, bool extend_belt = true) const;
     // A belt printer with belt_printer_infinite_y: the plate is open along Y for the
     // containment tests (the drawn plate keeps its shape).
     bool belt_open_y() const;
@@ -737,7 +746,7 @@ public:
         std::vector<std::pair<int, int>>	objects_and_instances;
         std::vector<std::pair<int, int>>	instances_outside;
 
-        ar(m_plate_index, m_name, m_print_index, m_origin, m_width, m_depth, m_height, m_locked, m_selected, m_ready_for_slice, m_slice_result_valid, m_apply_invalid, m_printable, m_tmp_gcode_path, objects_and_instances, instances_outside, m_config);
+        ar(m_plate_index, m_name, m_print_index, m_origin, m_width, m_depth, m_height, m_locked, m_selected, m_ready_for_slice, m_slice_result_valid, m_apply_invalid, m_printable, m_tmp_gcode_path, objects_and_instances, instances_outside, m_config, m_printer_profile.config, m_printer_profile.is_bambu);
 
         for (std::vector<std::pair<int, int>>::iterator it = objects_and_instances.begin(); it != objects_and_instances.end(); ++it)
             obj_to_instance_set.insert(std::pair(it->first, it->second));
@@ -757,7 +766,7 @@ public:
         for (std::set<std::pair<int, int>>::iterator it = obj_to_instance_set.begin(); it != obj_to_instance_set.end(); ++it)
             objects_and_instances.emplace_back(it->first, it->second);
 
-        ar(m_plate_index, m_name, m_print_index, m_origin, m_width, m_depth, m_height, m_locked, m_selected, m_ready_for_slice, m_slice_result_valid, m_apply_invalid, m_printable, m_tmp_gcode_path, objects_and_instances, instances_outside, m_config);
+        ar(m_plate_index, m_name, m_print_index, m_origin, m_width, m_depth, m_height, m_locked, m_selected, m_ready_for_slice, m_slice_result_valid, m_apply_invalid, m_printable, m_tmp_gcode_path, objects_and_instances, instances_outside, m_config, m_printer_profile.config, m_printer_profile.is_bambu);
     }
     /*template<class Archive> void serialize(Archive& ar)
     {
@@ -783,6 +792,12 @@ class PartPlateList : public ObjectBase
     int m_current_plate;
     int m_print_index;
 
+    Vec2d m_printer_profile_pitch = Vec2d::Zero();
+    std::vector<Vec2d> m_printer_profile_offsets;
+    bool m_printer_profile_layout_pending = false;
+    void update_printer_profile_layout();
+    void position_plate(PartPlate& plate, Vec3d origin, bool move_instances, bool clear, bool keep_local = false);
+    void set_plate_shape(PartPlate& plate, Vec2d position);
     int m_plate_width;
     int m_plate_depth;
     double m_plate_height;
@@ -916,6 +931,9 @@ public:
     void reinit();
 
     //get the plate stride
+    bool has_printer_profiles() const;
+    void refresh_printer_profile_layout(bool move_loaded_instances = false);
+    void finish_loading_printer_profile_layout();
     double plate_stride_x();
     double plate_stride_y();
     void get_plate_size(int& width, int& depth, double& height) {
@@ -995,7 +1013,7 @@ public:
     //update the plate cols due to plate count change
     void update_plate_cols();
 
-    void update_all_plates_pos_and_size(bool adjust_position = true, bool with_unprintable_move = true, bool switch_plate_type = false, bool do_clear = true);
+    void update_all_plates_pos_and_size(bool adjust_position = true, bool with_unprintable_move = true, bool switch_plate_type = false, bool do_clear = true, bool keep_local = false);
 
     //get the plate cols
     int get_plate_cols() { return m_plate_cols; }
@@ -1045,7 +1063,8 @@ public:
     bool preprocess_arrange_polygon(int obj_index, int instance_index, arrangement::ArrangePolygon& arrange_polygon, bool selected);
     bool preprocess_arrange_polygon_other_locked(int obj_index, int instance_index, arrangement::ArrangePolygon& arrange_polygon, bool selected);
     bool preprocess_exclude_areas(arrangement::ArrangePolygons &unselected, const DynamicPrintConfig &config,
-                                  bool enable_wrapping_detect, int num_plates = 16, float inflation = 0);
+                                  bool enable_wrapping_detect, int num_plates = 16, float inflation = 0,
+                                  const PartPlate* reference_plate = nullptr);
     bool preprocess_nonprefered_areas(arrangement::ArrangePolygons& regions, int num_plates = 1, float inflation=0);
 
     void postprocess_bed_index_for_selected(arrangement::ArrangePolygon& arrange_polygon);
@@ -1079,7 +1098,8 @@ public:
                     const std::vector<double>  &extruder_heights,
                     const std::string          &custom_texture,
                     float                       height_to_lid,
-                    float                       height_to_rod);
+                    float                       height_to_rod,
+                    bool                        move_loaded_instances = false);
     void set_hover_id(int id);
     void reset_hover_id();
     bool intersects(const BoundingBoxf3 &bb);

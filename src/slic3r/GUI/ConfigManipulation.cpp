@@ -766,11 +766,14 @@ void ConfigManipulation::apply_null_fff_config(DynamicPrintConfig *config, std::
     }
 }
 
-void ConfigManipulation::toggle_print_fff_options(DynamicPrintConfig *config, int variant_index, const bool is_global_config)
+void ConfigManipulation::toggle_print_fff_options(DynamicPrintConfig *config, int variant_index, bool is_global_config,
+                                                     const DynamicPrintConfig* display_printer_config)
 {
-    PresetBundle *preset_bundle  = wxGetApp().preset_bundle;
+    const auto& printer_config = display_printer_config ? *display_printer_config
+        : wxGetApp().preset_bundle->printers.get_edited_preset().config;
+    const bool read_only = display_printer_config != nullptr;
 
-    const GCodeFlavor gcflavor = preset_bundle->printers.get_edited_preset().config.option<ConfigOptionEnum<GCodeFlavor>>("gcode_flavor")->value;
+    const GCodeFlavor gcflavor = printer_config.option<ConfigOptionEnum<GCodeFlavor>>("gcode_flavor")->value;
 
     // Orca: use booleans to avoid repeated comparisons with enum values
     const bool gcf_is_marlin_firmware = gcflavor == GCodeFlavor::gcfMarlinFirmware;
@@ -783,12 +786,11 @@ void ConfigManipulation::toggle_print_fff_options(DynamicPrintConfig *config, in
     bool is_belt_printer = false;
     bool is_belt_tilted  = false;
     {
-        const auto &printer_cfg = preset_bundle->printers.get_edited_preset().config;
-        const auto *belt_opt = printer_cfg.option<ConfigOptionBool>("belt_printer");
+        const auto *belt_opt = printer_config.option<ConfigOptionBool>("belt_printer");
         if (belt_opt)
             is_belt_printer = belt_opt->value;
-        const auto *axis  = printer_cfg.option<ConfigOptionEnum<BeltRotationAxis>>("belt_slice_rotation");
-        const auto *angle = printer_cfg.option<ConfigOptionFloat>("belt_slice_rotation_angle");
+        const auto *axis  = printer_config.option<ConfigOptionEnum<BeltRotationAxis>>("belt_slice_rotation");
+        const auto *angle = printer_config.option<ConfigOptionFloat>("belt_slice_rotation_angle");
         if (is_belt_printer && axis != nullptr && angle != nullptr) {
             // Same window as Print::has_tilted_belt(); shared constants so the GUI and
             // the backend cannot drift apart.
@@ -804,8 +806,8 @@ void ConfigManipulation::toggle_print_fff_options(DynamicPrintConfig *config, in
     toggle_field("enable_arc_fitting", !have_volumetric_extrusion_rate_slope && !is_belt_printer, -1, _L("Arc fitting is unavailable for belt printers and when extrusion rate smoothing is enabled."));
     toggle_line("max_volumetric_extrusion_rate_slope_segment_length", have_volumetric_extrusion_rate_slope, -1, extrusion_smoothing_reason);
     toggle_line("extrusion_rate_smoothing_external_perimeter_only", have_volumetric_extrusion_rate_slope, -1, extrusion_smoothing_reason);
-    if(have_volumetric_extrusion_rate_slope) config->set_key_value("enable_arc_fitting", new ConfigOptionEnum<ArcFittingMode>(ArcFittingMode::Disabled));
-    if(have_volumetric_extrusion_rate_slope_segment_length < 0.5) {
+    if (!read_only && have_volumetric_extrusion_rate_slope) config->set_key_value("enable_arc_fitting", new ConfigOptionEnum<ArcFittingMode>(ArcFittingMode::Disabled));
+    if (!read_only && have_volumetric_extrusion_rate_slope_segment_length < 0.5) {
         DynamicPrintConfig new_conf = *config;
         new_conf.set_key_value("max_volumetric_extrusion_rate_slope_segment_length", new ConfigOptionFloat(1));
         apply(config, &new_conf);
@@ -860,7 +862,7 @@ void ConfigManipulation::toggle_print_fff_options(DynamicPrintConfig *config, in
         toggle_field("fill_multiline", have_multiline_infill_pattern, -1, _L("The selected sparse infill pattern does not support multiline infill."));
         // If the infill pattern does not support multiline fill_multiline is changed to 1.
         // Necessary when the pattern contains params.multiline (for example, triangles because they belong to the rectilinear class)
-        if (!have_multiline_infill_pattern) {
+        if (!read_only && !have_multiline_infill_pattern) {
             DynamicPrintConfig new_conf = *config;
             new_conf.set_key_value("fill_multiline", new ConfigOptionInt(1));
             apply(config, &new_conf);
@@ -965,7 +967,7 @@ void ConfigManipulation::toggle_print_fff_options(DynamicPrintConfig *config, in
 
     bool machine_supports_junction_deviation = false;
     if (gcf_is_marlin_firmware) {
-        if (const auto *machine_jd = preset_bundle->printers.get_edited_preset().config.option<ConfigOptionFloats>("machine_max_junction_deviation")) {
+        if (const auto *machine_jd = printer_config.option<ConfigOptionFloats>("machine_max_junction_deviation")) {
             machine_supports_junction_deviation = !machine_jd->values.empty() && machine_jd->values.front() > 0.0;
         }
     }
@@ -1166,8 +1168,8 @@ void ConfigManipulation::toggle_print_fff_options(DynamicPrintConfig *config, in
 
     toggle_field("single_extruder_multi_material", !is_BBL_Printer, -1, _L("This setting is unavailable for Bambu Lab printers."));
 
-    auto bSEMM = preset_bundle->printers.get_edited_preset().config.opt_bool("single_extruder_multi_material");
-    const bool supports_wipe_tower_2 = !is_BBL_Printer && preset_bundle->printers.get_edited_preset().config.opt_enum<WipeTowerType>("wipe_tower_type") == WipeTowerType::Type2;
+    auto bSEMM = printer_config.opt_bool("single_extruder_multi_material");
+    const bool supports_wipe_tower_2 = !is_BBL_Printer && printer_config.opt_enum<WipeTowerType>("wipe_tower_type") == WipeTowerType::Type2;
 
     toggle_field("ooze_prevention", !bSEMM, -1, _L("This setting is unavailable in single extruder multimaterial mode."));
     bool have_ooze_prevention = config->opt_bool("ooze_prevention");
@@ -1183,8 +1185,8 @@ void ConfigManipulation::toggle_print_fff_options(DynamicPrintConfig *config, in
     // enable_belt_purge_tower. Its width (a process option) is only relevant
     // then. (is_belt_printer is computed at the top of this function.)
     const bool have_belt_purge_tower = is_belt_printer
-        && preset_bundle->printers.get_edited_preset().config.has("enable_belt_purge_tower")
-        && preset_bundle->printers.get_edited_preset().config.opt_bool("enable_belt_purge_tower");
+        && printer_config.has("enable_belt_purge_tower")
+        && printer_config.opt_bool("enable_belt_purge_tower");
     toggle_line("belt_purge_tower_width", have_belt_purge_tower, -1, _L("Enable the belt purge tower in the belt printer settings to use this setting."));
     const wxString prime_tower_reason = _L("Enable the prime tower on a non-belt printer to use this setting.");
     for (auto el : {"prime_tower_width", "prime_tower_brim_width", "prime_tower_skip_points", "wipe_tower_wall_type", "prime_tower_infill_gap","prime_tower_enable_framework", "enable_tower_interface_features"})
@@ -1193,7 +1195,7 @@ void ConfigManipulation::toggle_print_fff_options(DynamicPrintConfig *config, in
     toggle_line("enable_tower_interface_cooldown_during_tower",
                 have_prime_tower && !is_belt_printer && config->opt_bool("enable_tower_interface_features"), -1, _L("Enable the prime tower and tower interface features on a non-belt printer to use this setting."));
 
-    bool purge_in_primetower = preset_bundle->printers.get_edited_preset().config.opt_bool("purge_in_prime_tower");
+    bool purge_in_primetower = printer_config.opt_bool("purge_in_prime_tower");
 
     for (auto el : {"wipe_tower_rotation_angle", "wipe_tower_cone_angle",
                     "wipe_tower_extra_spacing", "wipe_tower_max_purge_speed",
@@ -1305,7 +1307,7 @@ void ConfigManipulation::toggle_print_fff_options(DynamicPrintConfig *config, in
     toggle_line("overhang_reverse", allow_overhang_reverse, -1, _L("Reverse overhang direction is unavailable in spiral vase mode."));
     toggle_line("overhang_reverse_internal_only", allow_overhang_reverse && has_overhang_reverse, -1, _L("Disable spiral vase mode and enable reverse overhang direction to use this setting."));
     bool has_overhang_reverse_internal_only = config->opt_bool("overhang_reverse_internal_only");
-    if (has_overhang_reverse_internal_only){
+    if (!read_only && has_overhang_reverse_internal_only) {
         DynamicPrintConfig new_conf = *config;
         new_conf.set_key_value("overhang_reverse_threshold", new ConfigOptionFloatOrPercent(0,true));
         apply(config, &new_conf);
