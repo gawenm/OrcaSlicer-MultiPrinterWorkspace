@@ -5,6 +5,7 @@ on:
     branches:
      - main
      - release/*
+     - review/orca-mpw-v2.5.0
     paths:
      - 'deps/**'
      - 'deps_src/**'
@@ -120,6 +121,43 @@ jobs:
       arch: ${{ matrix.arch }}
       build-deps-only: ${{ inputs.build-deps-only || false }}
     secrets: inherit
+  package_mpw_linux:
+    name: Package MPW for Arch and Debian
+    needs: build_linux
+    if: ${{ github.repository == 'gawenm/OrcaSlicer-MultiPrinterWorkspace' && (github.event_name == 'workflow_dispatch' || github.ref == 'refs/heads/review/orca-mpw-v2.5.0') && !inputs.build-deps-only }}
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/download-artifact@v8
+        with:
+          pattern: OrcaSlicer_Linux_ubuntu_*
+          path: appimages
+      - name: Build native Linux packages
+        shell: bash
+        run: |
+          set -euo pipefail
+          sudo apt-get update
+          sudo apt-get install -y zstd
+          mapfile -t images < <(find appimages -type f -name '*.AppImage' ! -name '*aarch64*')
+          if (( ${#images[@]} != 1 )); then
+            echo 'Expected exactly one x86-64 AppImage.' >&2
+            exit 1
+          fi
+          version=$(sed -nE 's/^set\(SoftFever_VERSION "([0-9]+\.[0-9]+\.[0-9]+)[^"]*"\)$/\1/p' version.inc)
+          bash scripts/package_mpw_linux.sh "${images[0]}" "$version" "$GITHUB_RUN_NUMBER" dist
+      - uses: actions/upload-artifact@v7
+        with:
+          name: Orca-MPW-Arch-x86_64
+          path: dist/*.pkg.tar.zst
+          if-no-files-found: error
+      - uses: actions/upload-artifact@v7
+        with:
+          name: Orca-MPW-Debian-amd64
+          path: dist/*.deb
+          if-no-files-found: error
+
   build_windows:
     name: Build Windows ${{ matrix.arch }}
     strategy:
