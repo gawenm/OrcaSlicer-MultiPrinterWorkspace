@@ -1,6 +1,8 @@
 #ifndef slic3r_GUI_PlatePrintContext_hpp_
 #define slic3r_GUI_PlatePrintContext_hpp_
 
+#include <wx/wxprec.h>
+
 #include "DeviceManager.hpp"
 #include "PartPlate.hpp"
 #include "Plater.hpp"
