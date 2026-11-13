@@ -1,0 +1,72 @@
+name: Build Windows
+
+# Manually run this one platform without starting Build all.
+# GitHub Actions -> Run workflow -> choose review/orca-mpw-v2.5.0.
+on:
+  workflow_dispatch:
+    inputs:
+      build-deps-only:
+        description: Build dependencies only (no installer or tests)
+        type: boolean
+        default: false
+
+concurrency:
+  group: mpw-windows-${{ github.ref }}
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+  actions: write
+  checks: write
+
+jobs:
+  check_build_script:
+    name: Validate Windows build scripts
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          lfs: 'false'
+      - name: Test build_win.bat
+        shell: powershell
+        run: .\scripts\test_build_win.ps1
+      - name: Check exception throw info checks
+        shell: powershell
+        run: .\scripts\test_check_exception_throw_info.ps1
+      - name: Check preset pruning
+        shell: powershell
+        run: .\scripts\test_prune_cached_presets.ps1
+
+  build_windows:
+    name: Build Windows ${{ matrix.arch }}
+    needs: check_build_script
+    strategy:
+      fail-fast: false
+      matrix:
+        include: ${{ fromJSON(vars.SELF_HOSTED && '[{"arch":"x64","os":"orca-win-server","compiler":"clang"}]' || '[{"arch":"x64","os":"windows-latest","compiler":"clang"},{"arch":"arm64","os":"windows-11-vs2026-arm","compiler":"clang"}]') }}
+    uses: ./.github/workflows/build_check_cache.yml
+    with:
+      os: ${{ matrix.os }}
+      arch: ${{ matrix.arch }}
+      compiler: ${{ matrix.compiler }}
+      build-deps-only: ${{ inputs.build-deps-only }}
+    secrets: inherit
+
+  unit_tests_windows_x64:
+    name: Windows x64 / Unit Tests
+    needs: build_windows
+    if: ${{ !cancelled() && needs.build_windows.result == 'success' && !inputs.build-deps-only }}
+    uses: ./.github/workflows/unit_tests.yml
+    with:
+      os: ${{ vars.SELF_HOSTED && 'orca-win-server' || 'windows-latest' }}
+      artifact: ${{ github.sha }}-tests-windows-x64
+
+  unit_tests_windows_arm64:
+    name: Windows ARM64 / Unit Tests
+    needs: build_windows
+    if: ${{ !cancelled() && needs.build_windows.result == 'success' && !inputs.build-deps-only && !vars.SELF_HOSTED }}
+    uses: ./.github/workflows/unit_tests.yml
+    with:
+      os: windows-11-vs2026-arm
+      artifact: ${{ github.sha }}-tests-windows-arm64
+      test-dir: build-arm64/tests
