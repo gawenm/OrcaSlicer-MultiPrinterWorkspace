@@ -2699,6 +2699,9 @@ SCENARIO("a rendered no-light thumbnail does not suppress the plate thumbnail", 
 
 TEST_CASE("A project restores each plate's printer, process and G-code", "[3mf][PlatePrinterProfile]")
 {
+    // The importer also creates a backup tree for the reloaded model.
+    ScopedSlic3rTemporaryDir temporary_dir("orca_plate_printers_round_trip");
+
     Model model;
     REQUIRE(load_stl((std::string(TEST_DATA_DIR) + "/test_3mf/Prusa.stl").c_str(), &model));
     model.add_default_instances();
