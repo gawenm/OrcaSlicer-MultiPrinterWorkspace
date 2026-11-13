@@ -16,6 +16,8 @@ on:
      - 'localization/**'
      - 'resources/**'
      - ".github/workflows/build_*.yml"
+     - "!.github/workflows/build_*_mpw.yml"
+     - "!.github/workflows/build_*_mpw.yml"
      - ".github/workflows/unit_tests*.yml"
      - 'build_linux.sh'
      - 'build_win.bat'
