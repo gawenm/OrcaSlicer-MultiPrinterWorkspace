@@ -68,6 +68,16 @@ on:
         description: 'Only build dependencies (bypasses caching)'
         type: boolean
         default: false
+      target-platform:
+        description: 'Select a platform for a focused CI retry; push builds still run all platforms'
+        type: choice
+        default: all
+        options:
+          - all
+          - linux
+          - windows
+          - macos
+          - flatpak
 
 concurrency:
   # cancel_closed_pr_builds.yml joins this group by name, so update that file
@@ -114,7 +124,7 @@ jobs:
           && '[{"arch":"","os":"orca-lnx-server"}]'
           || '[{"arch":"","os":"ubuntu-24.04"},{"arch":"aarch64","os":"ubuntu-24.04-arm"}]') }}
     # Don't run scheduled builds on forks:
-    if: ${{ !cancelled() && (github.event_name != 'schedule' || github.repository == 'OrcaSlicer/OrcaSlicer') }}
+    if: ${{ !cancelled() && (github.event_name != 'schedule' || github.repository == 'OrcaSlicer/OrcaSlicer') && (github.event_name != 'workflow_dispatch' || inputs.target-platform == 'all' || inputs.target-platform == 'linux') }}
     uses: ./.github/workflows/build_check_cache.yml
     with:
       os: ${{ matrix.os }}
@@ -175,7 +185,7 @@ jobs:
       contents: write
       id-token: write
     # Don't run scheduled builds on forks:
-    if: ${{ !cancelled() && needs.check_build_script.result == 'success' && (github.event_name != 'schedule' || github.repository == 'OrcaSlicer/OrcaSlicer') }}
+    if: ${{ !cancelled() && needs.check_build_script.result == 'success' && (github.event_name != 'schedule' || github.repository == 'OrcaSlicer/OrcaSlicer') && (github.event_name != 'workflow_dispatch' || inputs.target-platform == 'all' || inputs.target-platform == 'windows') }}
     uses: ./.github/workflows/build_check_cache.yml
     with:
       os: ${{ matrix.os }}
@@ -192,7 +202,7 @@ jobs:
           - arm64
           - x86_64
     # Don't run scheduled builds on forks:
-    if: ${{ !cancelled() && (github.event_name != 'schedule' || github.repository == 'OrcaSlicer/OrcaSlicer') }}
+    if: ${{ !cancelled() && (github.event_name != 'schedule' || github.repository == 'OrcaSlicer/OrcaSlicer') && (github.event_name != 'workflow_dispatch' || inputs.target-platform == 'all' || inputs.target-platform == 'macos') }}
     uses: ./.github/workflows/build_check_cache.yml
     with:
       # Intel and Apple Silicon use different hosted runner labels. This
@@ -284,7 +294,7 @@ jobs:
   publish_test_results:
     name: Publish Test Results
     needs: [unit_tests_linux_x86_64, unit_tests_linux_aarch64, unit_tests_windows_x64, unit_tests_windows_arm64, unit_tests_macos_arm64, unit_tests_flatpak_x86_64, unit_tests_flatpak_aarch64]
-    if: ${{ !cancelled() }}
+    if: ${{ !cancelled() && (needs.unit_tests_linux_x86_64.result != 'skipped' || needs.unit_tests_linux_aarch64.result != 'skipped' || needs.unit_tests_windows_x64.result != 'skipped' || needs.unit_tests_windows_arm64.result != 'skipped' || needs.unit_tests_macos_arm64.result != 'skipped' || needs.unit_tests_flatpak_x86_64.result != 'skipped' || needs.unit_tests_flatpak_aarch64.result != 'skipped') }}
     runs-on: ubuntu-latest
     steps:
       - name: Download Test Results
@@ -325,7 +335,7 @@ jobs:
           - arch: aarch64
             runner: ubuntu-24.04-arm
     # Don't run scheduled builds on forks; skip entirely on self-hosted runners
-    if: ${{ !cancelled() && !vars.SELF_HOSTED && (github.event_name != 'schedule' || github.repository == 'OrcaSlicer/OrcaSlicer') }}
+    if: ${{ !cancelled() && !vars.SELF_HOSTED && (github.event_name != 'schedule' || github.repository == 'OrcaSlicer/OrcaSlicer') && (github.event_name != 'workflow_dispatch' || inputs.target-platform == 'all' || inputs.target-platform == 'flatpak') }}
 
     runs-on: ${{ matrix.variant.runner }}
     env:
