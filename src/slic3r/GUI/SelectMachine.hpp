@@ -13,6 +13,7 @@
 #include <list>
 #include <memory>
 #include "libslic3r/Format/bbs_3mf.hpp"
+#include "libslic3r/ObjectID.hpp"
 #include "slic3r/GUI/DeviceCore/DevDefs.h"
 #include "slic3r/GUI/Widgets/TextInput.hpp"
 #include "slic3r/GUI/Jobs/PrintJob.hpp"
@@ -316,6 +317,8 @@ private:
     int                                 m_print_plate_idx{0};
     DynamicPrintConfig                  m_plate_print_config;
     std::string                         m_plate_agent_id;
+    ObjectID                            m_print_plate_id;
+    std::string                         m_plate_device_id;
     int                                 m_print_plate_total{0};
     int                                 m_timeout_count{0};
     int                                 m_print_error_code{0};

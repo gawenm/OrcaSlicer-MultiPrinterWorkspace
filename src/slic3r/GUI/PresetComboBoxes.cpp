@@ -1122,14 +1122,16 @@ void PlaterPresetComboBox::set_sync_badge(bool show)
     ShowBadge(show);
 }
 
-bool PlaterPresetComboBox::switch_to_tab()
+bool PlaterPresetComboBox::switch_to_tab(const std::string& preset_name)
 {
     Tab* tab = wxGetApp().get_tab(m_type);
     if (!tab)
         return false;
 
-    const Preset* selected_filament_preset = nullptr;
-    if (m_type == Preset::TYPE_FILAMENT)
+    if (!preset_name.empty()) {
+        if (m_collection->get_selected_preset_name() != preset_name && !tab->select_preset(preset_name))
+            return false;
+    } else if (m_type == Preset::TYPE_FILAMENT)
     {
         // Reload the editor only when it has a different preset open than this slot.
         const std::string& slot_preset_name = wxGetApp().preset_bundle->filament_presets[m_filament_idx];

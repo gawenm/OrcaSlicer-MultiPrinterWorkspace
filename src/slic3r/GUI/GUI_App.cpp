@@ -4359,6 +4359,7 @@ void GUI_App::switch_printer_agent()
     const bool assigned = plate && plate->printer_profile().assigned();
     const auto* host_config = plate_print_host_config(plate, *preset_bundle);
     const std::string effective_agent_id = plate_printer_agent_id(plate, *preset_bundle);
+    const auto current_printer_agent = m_agent->get_printer_agent();
 
     // Check if agent is registered
     const PrinterAgentInfo* agent_info_ptr = NetworkAgentFactory::get_printer_agent_info(effective_agent_id);
@@ -4367,30 +4368,13 @@ void GUI_App::switch_printer_agent()
         // live agent up would keep talking to a machine the user can no longer select.
         BOOST_LOG_TRIVIAL(info) << __FUNCTION__ << ": agent ID '" << effective_agent_id
                                 << "' is unregistered; clearing live printer agent";
-        set_live_printer_agent(nullptr);
-        return;
-    }
-    const PrinterAgentInfo agent_info = *agent_info_ptr;
-
-    std::string log_dir        = data_dir();
-    std::string cloud_agent_id = agent_info.id == BBL_PRINTER_AGENT_ID ? BBL_CLOUD_PROVIDER : ORCA_CLOUD_PROVIDER;
-    BOOST_LOG_TRIVIAL(info) << __FUNCTION__ << " " << agent_info.id;
-    std::shared_ptr<ICloudServiceAgent> cloud_agent = m_agent->get_cloud_agent(cloud_agent_id);
-
-    // Create new printer agent via registry
-    std::shared_ptr<IPrinterAgent> new_printer_agent =
-        NetworkAgentFactory::create_printer_agent_by_id(effective_agent_id, cloud_agent, log_dir);
-
-    if (!new_printer_agent) {
-        BOOST_LOG_TRIVIAL(warning) << __FUNCTION__ << ": failed to create agent '" << effective_agent_id
-                                   << "'; clearing live printer agent";
-        set_live_printer_agent(nullptr);
+        if (current_printer_agent)
+            set_live_printer_agent(nullptr);
         return;
     }
 
     // Compare the registered IDs, not only the implementation pointer. Different registry IDs
     // may intentionally be backed by the same implementation object (especially for plugins).
-    const auto current_printer_agent = m_agent->get_printer_agent();
     if (current_printer_agent && current_printer_agent->get_agent_info().id == effective_agent_id) {
         // Orca: the agent type is unchanged (e.g. switching between two Moonraker/Klipper
         // printer presets), so the selected machine and the agent's cached device_info still
@@ -4400,11 +4384,13 @@ void GUI_App::switch_printer_agent()
         if (effective_agent_id != BBL_PRINTER_AGENT_ID && m_device_manager) {
             const std::string print_host = host_config ? host_config->opt_string("print_host") : std::string();
             if (!print_host.empty()) {
-                const std::string dev_id = MachineObject::dev_id_from_address(print_host, host_config->opt_string("printhost_port"));
+                const std::string dev_id = plate_print_host_device_id(*host_config);
                 MachineObject* sel = m_device_manager->get_selected_machine();
-                const bool access_code_changed = effective_agent_id == MOONRAKER_PRINTER_AGENT_ID && sel &&
-                                                 sel->get_access_code() != host_config->opt_string("printhost_apikey");
-                if (!sel || sel->get_dev_id() != dev_id || access_code_changed) {
+                const auto& apikey = host_config->opt_string("printhost_apikey");
+                const bool access_code_changed = sel && (assigned || effective_agent_id == MOONRAKER_PRINTER_AGENT_ID) &&
+                    sel->get_access_code() != (apikey.empty() && effective_agent_id != MOONRAKER_PRINTER_AGENT_ID ? "88888888" : apikey);
+                const bool scheme_changed = assigned && sel && sel->local_use_ssl != boost::istarts_with(print_host, "https://");
+                if (!sel || sel->get_dev_id() != dev_id || access_code_changed || scheme_changed) {
                     if (assigned && sel && sel->get_dev_id() != dev_id)
                         m_device_manager->set_selected_machine("");
                     select_machine(effective_agent_id);
@@ -4414,6 +4400,16 @@ void GUI_App::switch_printer_agent()
                 m_agent->set_user_selected_machine("");
             }
         }
+        return;
+    }
+
+    const std::string cloud_agent_id = effective_agent_id == BBL_PRINTER_AGENT_ID ? BBL_CLOUD_PROVIDER : ORCA_CLOUD_PROVIDER;
+    auto new_printer_agent = NetworkAgentFactory::create_printer_agent_by_id(
+        effective_agent_id, m_agent->get_cloud_agent(cloud_agent_id), data_dir());
+    if (!new_printer_agent) {
+        BOOST_LOG_TRIVIAL(warning) << __FUNCTION__ << ": failed to create agent '" << effective_agent_id
+                                   << "'; clearing live printer agent";
+        set_live_printer_agent(nullptr);
         return;
     }
 
@@ -4435,7 +4431,7 @@ void GUI_App::switch_printer_agent_if_pending()
     if (!m_agent || !preset_bundle)
         return;
 
-    const std::string wanted_agent_id = resolve_printer_agent_id(preset_bundle->printers.get_edited_preset().config.opt_string("printer_agent"));
+    const std::string wanted_agent_id = plate_printer_agent_id(selected_print_plate(plater()), *preset_bundle);
     const auto        live_agent      = m_agent->get_printer_agent();
     if (live_agent && live_agent->get_agent_info().id == wanted_agent_id)
         return;
@@ -4462,13 +4458,15 @@ void GUI_App::select_machine(const std::string& agent_id)
     }
 
     const PartPlate* plate = selected_print_plate(plater());
+    const bool assigned = plate && plate->printer_profile().assigned();
     const DynamicPrintConfig* host_cfg = plate_print_host_config(plate, *preset_bundle);
     if (host_cfg == nullptr)
         return;
 
     // Hands the machine to the Device tab's full selection flow (UI updates, callbacks, etc.).
-    auto select_dev = [this](const std::string& dev_id) {
-        if (MonitorPanel* monitor = MonitorPanel::if_built()) {
+    auto select_dev = [this, assigned](const std::string& dev_id) {
+        // An assigned plate needs its connection selected before Print plate prepares its dialog.
+        if (MonitorPanel* monitor = assigned ? nullptr : MonitorPanel::if_built()) {
             monitor->select_machine(dev_id);
             BOOST_LOG_TRIVIAL(info) << "GUI_App::select_machine" << ": triggered select_machine for dev_id=" << dev_id;
         } else if (m_device_manager->set_selected_machine(dev_id)) {
@@ -4480,6 +4478,8 @@ void GUI_App::select_machine(const std::string& agent_id)
 
     std::string print_host = host_cfg->opt_string("print_host");
     if (print_host.empty()) {
+        if (assigned)
+            return;
         // Orca: a printer bound from the Device tab is kept as a device of the agent rather than in
         // the preset's print_host. Select it when it is the agent's only one, as
         // MainFrame::load_printer_url() does; otherwise nothing is selected until the print dialog
@@ -4513,7 +4513,7 @@ void GUI_App::select_machine(const std::string& agent_id)
 
     const bool rebind_orca_entry = existing && existing->printer_agent_id == ORCA_PRINTER_AGENT_ID &&
                                     agent_id != ORCA_PRINTER_AGENT_ID;
-    if (plate && plate->printer_profile().assigned() && existing && !rebind_orca_entry &&
+    if (assigned && existing && !rebind_orca_entry &&
         !existing->printer_agent_id.empty() && existing->printer_agent_id != agent_id)
         return;
 
@@ -4533,7 +4533,7 @@ void GUI_App::select_machine(const std::string& agent_id)
             return;
         }
         BOOST_LOG_TRIVIAL(info) << __FUNCTION__ << ": created or adopted machine dev_id=" << dev_id;
-    } else if (agent_id == MOONRAKER_PRINTER_AGENT_ID && existing->printer_agent_id == agent_id &&
+    } else if ((assigned || agent_id == MOONRAKER_PRINTER_AGENT_ID) && existing->printer_agent_id == agent_id &&
                (!existing->has_access_right() || existing->get_access_code() != access_code)) {
         existing->set_access_code(access_code);
     }

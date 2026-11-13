@@ -949,7 +949,7 @@ public:
 
     /*basic plate operations*/
     //create an empty plate and return its index
-    int create_plate(bool adjust_position = true);
+    int create_plate(bool adjust_position = true, const PlatePrinterProfile* row_profile = nullptr);
 
     // duplicate plate
     int duplicate_plate(int index);

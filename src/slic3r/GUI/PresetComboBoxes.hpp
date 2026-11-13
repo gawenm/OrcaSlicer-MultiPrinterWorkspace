@@ -210,7 +210,7 @@ public:
 
     wxColor get_color() { return m_color; }
 
-    bool switch_to_tab();
+    bool switch_to_tab(const std::string& preset_name = {});
     void change_extruder_color();
     void show_add_menu();
     void show_edit_menu();

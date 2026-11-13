@@ -4391,6 +4391,8 @@ int CLI::run(int argc, char **argv)
     if ((current_extruder_areas.size() > 0) && (current_extruder_areas.size() == current_extruder_print_heights.size())) {
         BoundingBox current_bbox({0, 0}, {current_printable_width, current_printable_depth});
         int temp_height = current_printable_height;
+        const bool all_areas_defined = std::all_of(current_extruder_areas.begin(), current_extruder_areas.end(),
+            [](const Pointfs& area) { return area.size() >= 3; });
 
         for (unsigned int temp_index = 0; temp_index < current_extruder_areas.size(); temp_index++)
         {
@@ -4409,6 +4411,12 @@ int CLI::run(int argc, char **argv)
                 current_bbox.max.y() = temp_bbox.max.y();
             if ((int)(current_extruder_print_heights[temp_index]) < temp_height)
                 temp_height = current_extruder_print_heights[temp_index];
+        }
+        if (all_areas_defined && (current_bbox.min.x() >= current_bbox.max.x() || current_bbox.min.y() >= current_bbox.max.y())) {
+            const char* message = "The configured extruders have no shared printable area.";
+            boost::nowide::cerr << message << '\n';
+            record_exit_reson(outfile_dir, CLI_INVALID_PARAMS, 0, message, sliced_info);
+            flush_and_exit(CLI_INVALID_PARAMS);
         }
         shared_printable_width = current_bbox.size().x();
         shared_printable_depth = current_bbox.size().y();

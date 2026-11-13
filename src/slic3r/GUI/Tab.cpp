@@ -8441,6 +8441,9 @@ void Tab::save_preset(std::string name /*= ""*/, bool detach, bool save_to_proje
             wxGetApp().get_tab(preset_type)->update_tab_ui();
     }
 
+    if (m_type == Preset::TYPE_PRINTER && wxGetApp().plater())
+        wxGetApp().plater()->update_plates_using_printer_preset(curr_preset_name, new_preset->name);
+
     // show() reloads the presets, so only a visible Compare dialog needs updating.
     DiffPresetDialog* diff_dialog = DiffPresetDialog::if_built();
     if (diff_dialog != nullptr && diff_dialog->IsShown())

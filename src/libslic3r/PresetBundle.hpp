@@ -376,6 +376,7 @@ public:
 
     // Orca: get vendor type
     VendorType get_current_vendor_type();
+    VendorType get_vendor_type(const DynamicPrintConfig& config) const;
     // Vendor related handy functions
     bool is_bbl_vendor() { return get_current_vendor_type() == VendorType::Marlin_BBL; }
 

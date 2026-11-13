@@ -200,6 +200,7 @@ class MainFrame : public DPIFrame
     // The latest EVT_LOAD_PRINTER_URL, applied when the web Device view is built.
     wxString              m_printer_url;
     wxString              m_printer_api_key;
+    std::shared_ptr<const DynamicPrintConfig> m_printer_view_config;
 
     wxString    m_qs_last_input_file = wxEmptyString;
     wxString    m_qs_last_output_file = wxEmptyString;
@@ -486,14 +487,14 @@ public:
 
     //BBS
     void        load_url(wxString url);
-    void        load_printer_url(wxString url, wxString apikey = "");
+    void        load_printer_url(wxString url, wxString apikey = "", const DynamicPrintConfig* config = nullptr);
     void        load_printer_url();
     bool        is_printer_view() const;
     void        refresh_plugin_tips();
     void RunScript(wxString js);
 
     //SoftFever
-    void show_device(bool should_use_native);
+    void show_device();
     void fit_tab_labels(); // ORCA
     // True while either of the two tabs backed by m_plater is selected.
     bool is_prepare_or_preview_tab() const;
