@@ -8815,6 +8815,9 @@ int PartPlateList::load_from_3mf_structure(PlateDataPtrs& plate_data_list, int f
 	for (unsigned int i = 0; i < (unsigned int)plate_data_list.size(); ++i)
 	{
 		int index = create_plate(false);
+		// Restore the printer context before constructing the plate's print state.
+		// get_print() below must see the saved machine, not the project default.
+		m_plate_list[index]->m_printer_profile = plate_data_list[i]->printer_profile;
 		m_plate_list[index]->m_locked = plate_data_list[i]->locked;
 		m_plate_list[index]->config()->apply(plate_data_list[i]->config);
 		m_plate_list[index]->set_plate_name(plate_data_list[i]->plate_name);
@@ -8953,8 +8956,6 @@ int PartPlateList::load_from_3mf_structure(PlateDataPtrs& plate_data_list, int f
 		}
 
 	}
-	for (size_t i = 0; i < m_plate_list.size(); ++i)
-		m_plate_list[i]->m_printer_profile = plate_data_list[i]->printer_profile;
 	if (has_printer_profiles()) {
 		m_printer_profile_layout_pending = true;
 		update_printer_profile_layout();
