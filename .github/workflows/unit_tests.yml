@@ -49,11 +49,20 @@ jobs:
           cmakeVersion: "~4.3.0"  # use most recent 4.3.x version
           useLocalCache: true
           useCloudCache: true
+      # CTest's generated test discovery files embed the O:/ path used by the
+      # Windows ARM64 build job to avoid MSVC filename-length limits.
+      # Each GitHub job gets a fresh VM, so recreate that alias before ctest.
+      - name: Restore Windows ARM64 build path for CTest
+        if: ${{ runner.os == 'Windows' && inputs.test-dir == 'build-arm64/tests' }}
+        shell: pwsh
+        run: |
+          & subst.exe O: "${{ github.workspace }}"
+          if ($LASTEXITCODE -ne 0) { throw "Failed to restore O: build path" }
       - name: Unpackage and Run Unit Tests
         timeout-minutes: 20
         shell: bash
         run: |
-          tar -xvf build_tests.tar
+          tar -xf build_tests.tar
           # Every platform builds with a multi-config generator (build_linux.sh uses Ninja
           # Multi-Config), so ctest needs the config: without it, plain add_test() tests
           # lose their labels and report "Not Run".
