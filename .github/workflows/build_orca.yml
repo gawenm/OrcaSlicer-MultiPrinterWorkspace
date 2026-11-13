@@ -516,7 +516,17 @@ jobs:
           $deps = (Split-Path "${{ github.workspace }}/${{ inputs.cache-path }}").Replace('\', '/')
           # -l compiles with Visual Studio's clang-cl and -x builds with Ninja; --msvc --msbuild is cl under the Visual Studio generator.
           $flags = if ("${{ inputs.compiler }}" -eq "clang") { "-l", "-x" } else { "--msvc", "--msbuild" }
-          .\build_win.bat -s --tests -i --arch ${{ inputs.arch }} --build-dir $env:BUILD_DIR --deps-dir $deps @flags
+          $buildScript = ".\build_win.bat"
+          # The separate build job must recreate the alias embedded in ARM64 CMake cache files.
+          if ("${{ inputs.arch }}" -eq "arm64" -and -not "${{ vars.SELF_HOSTED }}") {
+            $drive = "O:"
+            & subst.exe $drive "${{ github.workspace }}"
+            if ($LASTEXITCODE -ne 0) { throw "Could not map short build path $drive" }
+            $deps = "${drive}/deps/build-arm64"
+            $buildScript = "${drive}\build_win.bat"
+          }
+          & $buildScript -s --tests -i --arch ${{ inputs.arch }} --build-dir $env:BUILD_DIR --deps-dir $deps @flags
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
         shell: pwsh
 
       - name: Build system preset cache (Windows)
@@ -878,8 +888,8 @@ jobs:
           key: ${{ env.CCACHE_ENTRY }}
 
       - name: Drop older compiler cache entries
-        if: ${{ always() && steps.ccache_save.outcome == 'success' }}
-        # A read-only token (fork PRs) cannot delete; that only costs storage.
+        if: ${{ always() && steps.ccache_save.outcome == 'success' && github.repository == 'OrcaSlicer/OrcaSlicer' }}
+        # Skip optional cache deletion on forks whose tokens lack cache-delete permissions.
         # Older means a lower run id, so two runs finishing close together keep
         # the newer entry whichever of them cleans up last.
         continue-on-error: true

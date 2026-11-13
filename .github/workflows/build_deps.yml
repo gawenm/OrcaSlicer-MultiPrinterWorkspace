@@ -128,7 +128,18 @@ jobs:
             $deps = (Split-Path "${{ github.workspace }}/${{ inputs.cache-path }}").Replace('\', '/')
             # -l compiles with Visual Studio's clang-cl and -x builds with Ninja; --msvc --msbuild is cl under the Visual Studio generator.
             $flags = if ("${{ inputs.compiler }}" -eq "clang") { "-l", "-x" } else { "--msvc", "--msbuild" }
-            .\build_win.bat -d --arch ${{ inputs.arch }} --deps-dir $deps @flags
+            $buildScript = ".\build_win.bat"
+            # OCCT generates paths too long for MSVC on hosted ARM64 runners.
+            # Subst shortens compiler-visible paths without changing the cached files.
+            if ("${{ inputs.arch }}" -eq "arm64" -and -not "${{ vars.SELF_HOSTED }}") {
+              $drive = "O:"
+              & subst.exe $drive "${{ github.workspace }}"
+              if ($LASTEXITCODE -ne 0) { throw "Could not map short build path $drive" }
+              $deps = "${drive}/deps/build-arm64"
+              $buildScript = "${drive}\build_win.bat"
+            }
+            & $buildScript -d --arch ${{ inputs.arch }} --deps-dir $deps @flags
+            if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
         shell: pwsh
 
       - name: Build on Mac ${{ inputs.arch }}

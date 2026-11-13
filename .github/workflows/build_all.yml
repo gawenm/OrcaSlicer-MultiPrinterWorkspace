@@ -473,8 +473,9 @@ jobs:
         path: .flatpak-builder/ccache
         key: ${{ env.CCACHE_ENTRY }}
     - name: Drop older compiler cache entries
-      if: ${{ always() && steps.ccache_save.outcome == 'success' }}
+      if: ${{ always() && steps.ccache_save.outcome == 'success' && github.repository == 'OrcaSlicer/OrcaSlicer' }}
       # The container has no gh, so this is the list and delete over the REST API.
+      # Forks skip optional cleanup because their workflow token may lack cache-delete access.
       # Older means a lower run id, so two runs finishing close together keep
       # the newer entry whichever of them cleans up last.
       continue-on-error: true
@@ -502,7 +503,8 @@ jobs:
       uses: actions/upload-artifact@v7
       with:
         name: OrcaSlicer-Linux-flatpak_${{ env.ver }}_${{ matrix.variant.arch }}.flatpak
-        path: '/__w/OrcaSlicer/OrcaSlicer/OrcaSlicer-Linux-flatpak_${{ env.ver }}_${{ matrix.variant.arch }}.flatpak'
+        path: '${{ github.workspace }}/OrcaSlicer-Linux-flatpak_${{ env.ver }}_${{ matrix.variant.arch }}.flatpak'
+        if-no-files-found: error
     - name: Deploy Flatpak to nightly release
       if: github.repository == 'OrcaSlicer/OrcaSlicer' && github.ref == 'refs/heads/main'
       uses: ./.github/actions/deploy-nightly
