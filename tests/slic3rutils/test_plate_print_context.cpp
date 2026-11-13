@@ -45,7 +45,9 @@ TEST_CASE("Assigned plates use the installed printer preset for networking", "[p
     CHECK(plate_printer_agent_id(&ender, bundle) == MOONRAKER_PRINTER_AGENT_ID);
     CHECK(plate_print_host_device_id(*ender_config) == "ender.example.test");
 
-    bundle.printers.get_edited_preset().config.opt_bool("bbl_use_printhost", true) = true;
+    auto* bambu_host_config = plate_print_host_config(&bambu, bundle);
+    REQUIRE(bambu_host_config != nullptr);
+    bambu_host_config->set_key_value("bbl_use_printhost", new ConfigOptionBool(true));
     CHECK(plate_printer_agent_id(&bambu, bundle) == ORCA_PRINTER_AGENT_ID);
 
     ender.config.opt_string("printer_variant", true) = "mismatched variant";

@@ -118,6 +118,9 @@ jobs:
         if: runner.os == 'Windows'
         working-directory: ${{ github.workspace }}
         run: |
+            # Git checks out third-party submodules in deeply nested dependency directories.
+            # Enable Windows long-path handling before CMake downloads dep_DataChannel.
+            git config --global core.longpaths true
             if (-not "${{ vars.SELF_HOSTED }}") {
               choco install strawberryperl
             }
