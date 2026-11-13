@@ -1072,10 +1072,13 @@ static void run_wizard(StartPage sp)
 
 void PlaterPresetComboBox::OnSelect(wxCommandEvent &evt)
 {
-    if (select_plate_choice(evt))
+    if (m_type != Preset::TYPE_FILAMENT && select_plate_choice(evt))
         return;
 
     auto selected_item = evt.GetSelection();
+
+    if (selected_item < 0 || size_t(selected_item) >= GetCount())
+        return;
 
     auto marker = reinterpret_cast<Marker>(this->GetClientData(selected_item));
     if (marker >= LABEL_ITEM_DISABLED && marker < LABEL_ITEM_MAX) {
@@ -1100,11 +1103,13 @@ void PlaterPresetComboBox::OnSelect(wxCommandEvent &evt)
             wxTheApp->CallAfter([sp]() { run_wizard(sp); });
         //}
         return;
-    } else if (marker == LABEL_ITEM_PHYSICAL_PRINTER ||  selected_item >= 0 || m_collection->current_is_dirty()) {
-        m_last_selected = selected_item;
-        if (m_type == Preset::TYPE_FILAMENT)
-            update_ams_color();
     }
+    if (select_plate_choice(evt))
+        return;
+
+    m_last_selected = selected_item;
+    if (m_type == Preset::TYPE_FILAMENT)
+        update_ams_color();
 
     evt.Skip();
 }
@@ -1122,14 +1127,16 @@ void PlaterPresetComboBox::set_sync_badge(bool show)
     ShowBadge(show);
 }
 
-bool PlaterPresetComboBox::switch_to_tab()
+bool PlaterPresetComboBox::switch_to_tab(const std::string& preset_name)
 {
     Tab* tab = wxGetApp().get_tab(m_type);
     if (!tab)
         return false;
 
-    const Preset* selected_filament_preset = nullptr;
-    if (m_type == Preset::TYPE_FILAMENT)
+    if (!preset_name.empty()) {
+        if (m_collection->get_selected_preset_name() != preset_name && !tab->select_preset(preset_name))
+            return false;
+    } else if (m_type == Preset::TYPE_FILAMENT)
     {
         // Reload the editor only when it has a different preset open than this slot.
         const std::string& slot_preset_name = wxGetApp().preset_bundle->filament_presets[m_filament_idx];
@@ -1228,10 +1235,23 @@ wxString PlaterPresetComboBox::get_preset_name(const Preset& preset)
 // If an incompatible preset is selected, it is shown as well.
 void PlaterPresetComboBox::update()
 {
-    if (has_plate_choices())
-        return;
+    if (!has_plate_choices())
+        update_presets(nullptr, {});
+}
 
-    if (m_type == Preset::TYPE_FILAMENT &&
+void PlaterPresetComboBox::set_plate_filament_choices(const std::vector<std::string>& compatible,
+    const std::string& current, std::function<void(const std::string&)> on_select)
+{
+    GetDropDown().Hide();
+    m_select_plate_preset = std::move(on_select);
+    update_presets(&compatible, current);
+}
+
+void PlaterPresetComboBox::update_presets(const std::vector<std::string>* compatible, const std::string& current)
+{
+    const bool plate_local = compatible != nullptr;
+
+    if (!plate_local && m_type == Preset::TYPE_FILAMENT &&
         (m_preset_bundle->printers.get_edited_preset().printer_technology() == ptSLA ||
         m_preset_bundle->filament_presets.size() <= (size_t)m_filament_idx) )
         return;
@@ -1242,7 +1262,7 @@ void PlaterPresetComboBox::update()
     invalidate_selection();
 
     const Preset* selected_filament_preset = nullptr;
-    if (m_type == Preset::TYPE_FILAMENT)
+    if (!plate_local && m_type == Preset::TYPE_FILAMENT)
     {
         // The slot can lie past the colour arrays: it still lists its presets, with a blank swatch.
         std::vector<wxBitmap *> bitmaps = get_extruder_color_icons(true);
@@ -1262,6 +1282,9 @@ void PlaterPresetComboBox::update()
         }
         //assert(selected_filament_preset);
     }
+
+    if (plate_local)
+        selected_filament_preset = m_collection->find_preset(current, false);
 
     bool has_selection = m_collection->get_selected_idx() != size_t(-1);
     const Preset* selected_preset = m_type == Preset::TYPE_FILAMENT ? selected_filament_preset : has_selection ? &m_collection->get_selected_preset() : nullptr;
@@ -1298,16 +1321,22 @@ void PlaterPresetComboBox::update()
     {
         const Preset& preset = presets[i];
         bool is_selected =  m_type == Preset::TYPE_FILAMENT ?
-                            m_preset_bundle->filament_presets[m_filament_idx] == preset.name :
+                            (plate_local ? current : m_preset_bundle->filament_presets[m_filament_idx]) == preset.name :
                             // The case, when some physical printer is selected
                             m_type == Preset::TYPE_PRINTER && m_preset_bundle->physical_printers.has_selection() ? false :
                             i == m_collection->get_selected_idx();
+
+        const bool preset_compatible = plate_local ?
+            std::find(compatible->begin(), compatible->end(), preset.name) != compatible->end() :
+            preset.is_compatible;
+        if (plate_local && !preset_compatible && !is_selected)
+            continue;
 
         if (!is_selected && !preset.is_visible)
         {
             continue;
         }
-        else if (is_selected && !preset.is_visible)
+        else if (!plate_local && is_selected && !preset.is_visible)
         {
             Preset& selected_preset = const_cast<Preset&>(preset);
             selected_preset.is_visible = true;
@@ -1342,9 +1371,9 @@ void PlaterPresetComboBox::update()
 #endif
             // ORCA allow caching vendor and type values for all presets instead just system ones
             // if (preset.is_system) { 
-                if (!preset.is_compatible && preset_filament_vendors.count(name) > 0)
+                if (!preset_compatible && preset_filament_vendors.count(name) > 0)
                     continue;
-                else if (preset.is_compatible && preset_filament_vendors.count(name) > 0)
+                else if (preset_compatible && preset_filament_vendors.count(name) > 0)
                     uncompatible_presets.erase(name);
                 preset_filament_vendors[name] = preset.config.option<ConfigOptionStrings>("filament_vendor")->values.at(0);
                 if (preset_filament_vendors[name] == "Bambu Lab")
@@ -1357,7 +1386,7 @@ void PlaterPresetComboBox::update()
 
         preset_descriptions.emplace(name, from_u8(preset.description));
 
-        if (!preset.is_compatible) {
+        if (!preset_compatible && !(plate_local && is_selected)) {
             if (boost::ends_with(name, " template"))
                 continue;
             uncompatible_presets.emplace(name, bmp);
@@ -1432,8 +1461,9 @@ void PlaterPresetComboBox::update()
     //if (m_type == Preset::TYPE_PRINTER)
     //    add_connected_printers("", true);
     bool selected_in_ams = false;
-    if (m_type == Preset::TYPE_FILAMENT) {
+    if (m_type == Preset::TYPE_FILAMENT)
         set_replace_text("Bambu", "BambuStudioBlack");
+    if (!plate_local && m_type == Preset::TYPE_FILAMENT) {
         // Orca: selected_system/user_preset hold the FULL preset name because Orca keys the maps above by
         // full name to avoid alias collisions (BBS keys by alias). add_ams_filaments() compares against
         // get_preset_name() which returns the alias, so resolve the selection back to its alias here.
@@ -1603,8 +1633,14 @@ void PlaterPresetComboBox::update()
         }
     }
 
-    update_selection();
-    if (m_type == Preset::TYPE_FILAMENT) {
+    if (plate_local && m_last_selected == INT_MAX) {
+        m_last_selected = current.empty() ? wxNOT_FOUND : Append(from_u8(current));
+        SetSelection(m_last_selected);
+        SetToolTip(from_u8(current));
+    } else {
+        update_selection();
+    }
+    if (!plate_local && m_type == Preset::TYPE_FILAMENT) {
         if (wxGetApp().plater()->is_same_printer_for_connected_and_selected(false)) {
             update_badge_according_flag();
         }

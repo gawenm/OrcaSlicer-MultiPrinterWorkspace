@@ -2709,6 +2709,8 @@ TEST_CASE("A project restores each plate's printer, process and G-code", "[3mf][
 
     DynamicPrintConfig project;
     project.apply(FullPrintConfig::defaults());
+    project.set_key_value("printer_technology", new ConfigOptionEnum<PrinterTechnology>(ptFFF));
+    project.set_key_value("printable_height", new ConfigOptionFloat(250.));
     project.set("printer_settings_id", "Project printer", true);
     PlateData bambu, klipper, inherited;
     bambu.plate_index = 0;

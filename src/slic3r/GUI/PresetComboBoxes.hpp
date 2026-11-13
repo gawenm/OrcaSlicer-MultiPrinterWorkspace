@@ -187,8 +187,10 @@ protected:
 
     wxBitmap *get_bmp(Preset const &preset);
 
-private:
+protected:
     std::function<void(const std::string&)> m_select_plate_preset;
+
+private:
     void fill_width_height();
 };
 
@@ -210,7 +212,7 @@ public:
 
     wxColor get_color() { return m_color; }
 
-    bool switch_to_tab();
+    bool switch_to_tab(const std::string& preset_name = {});
     void change_extruder_color();
     void show_add_menu();
     void show_edit_menu();
@@ -221,6 +223,8 @@ public:
     void OnSelect(wxCommandEvent& evt) override;
     void update_badge_according_flag();
     void set_sync_badge(bool show);
+    void set_plate_filament_choices(const std::vector<std::string>& compatible, const std::string& current,
+                                    std::function<void(const std::string&)> on_select);
 
     FilamentColor get_cur_color_info();
     void show_default_color_picker();
@@ -228,6 +232,7 @@ public:
     void sys_color_changed() override;
 
 private:
+    void update_presets(const std::vector<std::string>* compatible, const std::string& current);
     // BBS
     wxColor m_color;
     bool    m_sync_badge{false};

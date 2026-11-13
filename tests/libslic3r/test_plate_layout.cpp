@@ -49,3 +49,18 @@ TEST_CASE("An empty plate layout produces no offsets", "[PlateLayout]")
 {
     CHECK(layout_printer_plates({}, 0.2, 24.).empty());
 }
+
+TEST_CASE("A new plate on the selected printer row keeps that row's position", "[PlateLayout]")
+{
+    const std::vector<PlateLayoutInput> plates{
+        {"P1S", Vec2d(0, 0), Vec2d(256, 256)},
+        {"CR-30", Vec2d(0, 0), Vec2d(220, 800)},
+        {"P1S", Vec2d(0, 0), Vec2d(256, 256)},
+        {"CR-30", Vec2d(0, 0), Vec2d(220, 800)}
+    };
+    const auto offsets = layout_printer_plates(plates, 0.2, 24.);
+    REQUIRE(offsets.size() == 4);
+    CHECK_THAT(offsets[3].y(), WithinAbs(offsets[1].y(), 1e-6));
+    CHECK_THAT(offsets[3].x(), WithinAbs(220. * 1.2, 1e-6));
+    CHECK(offsets[3].y() != offsets[0].y());
+}

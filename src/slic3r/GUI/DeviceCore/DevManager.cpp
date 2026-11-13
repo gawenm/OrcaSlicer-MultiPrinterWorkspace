@@ -26,6 +26,7 @@
 #include "slic3r/GUI/DeviceManager.hpp"
 #include "slic3r/GUI/I18N.hpp"
 #include "slic3r/GUI/GUI_App.hpp"
+#include "slic3r/GUI/PlatePrintContext.hpp"
 #include "slic3r/GUI/Plater.hpp"
 #include "slic3r/plugin/PluginManager.hpp"
 #include "slic3r/Utils/NetworkAgentFactory.hpp"
@@ -647,6 +648,24 @@ namespace Slic3r
 
     bool DeviceManager::set_selected_machine(std::string dev_id)
     {
+        if (!dev_id.empty() && wxTheApp) {
+            auto& app = GUI::wxGetApp();
+            const auto* plate = GUI::selected_print_plate(app.plater());
+            if (app.preset_bundle && plate && plate->printer_profile().assigned()) {
+                const auto agent_id = GUI::plate_printer_agent_id(plate, *app.preset_bundle);
+                if (agent_id.empty() || agent_id != get_current_printer_agent_id())
+                    return false;
+                if (agent_id != BBL_PRINTER_AGENT_ID) {
+                    const auto* config = GUI::plate_print_host_config(plate, *app.preset_bundle);
+                    if (config == nullptr)
+                        return false;
+                    const auto target = GUI::plate_print_host_device_id(*config);
+                    if (!target.empty() && target != dev_id)
+                        return false;
+                }
+            }
+        }
+
         m_restore_last_machine = false; // any selection settles a pending restore_last_machine()
         BOOST_LOG_TRIVIAL(info) << "set_selected_machine=" << dev_id
             << " cur_selected=" << selected_machine;

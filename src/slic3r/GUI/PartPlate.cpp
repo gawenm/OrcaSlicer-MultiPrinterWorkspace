@@ -6703,7 +6703,7 @@ void PartPlateList::render_exclusion_volume_intersections(
     shader->stop_using();
 }
 
-int PartPlateList::create_plate(bool adjust_position)
+int PartPlateList::create_plate(bool adjust_position, const PlatePrinterProfile* row_profile)
 {
 	PartPlate* plate = NULL;
 	Vec3d origin;
@@ -6735,8 +6735,10 @@ int PartPlateList::create_plate(bool adjust_position)
 	plate->set_filament_count(m_filament_count);
 
 	plate->set_index(new_index);
+    if (row_profile && row_profile->assigned())
+        plate->set_printer_profile(*row_profile);
 	Vec2d pos = compute_shape_position(new_index, cols);
-	plate->set_shape(m_shape, m_exclude_areas, m_extruder_areas, m_extruder_heights, pos, m_height_to_lid, m_height_to_rod);
+	set_plate_shape(*plate, pos);
 	m_plate_list.emplace_back(plate);
 	update_plate_cols();
 	if (has_printer_profiles()) {
@@ -7001,6 +7003,8 @@ bool PartPlateList::check_all_plate_local_bed_type(const std::vector<BedType> &c
     bool        is_ok        = true;
     for (int i = 0; i < m_plate_list.size(); i++) {
         PartPlate *plate = m_plate_list[i];
+        if (plate->printer_profile().assigned())
+            continue;
         if (plate->config()  && plate->config()->has(bed_type_key)) {
             BedType bed_type = plate->config()->opt_enum<BedType>(bed_type_key);
             if (bed_type == BedType::btDefault)
