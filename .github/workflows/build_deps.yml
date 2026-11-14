@@ -129,17 +129,24 @@ jobs:
             # -l compiles with Visual Studio's clang-cl and -x builds with Ninja; --msvc --msbuild is cl under the Visual Studio generator.
             $flags = if ("${{ inputs.compiler }}" -eq "clang") { "-l", "-x" } else { "--msvc", "--msbuild" }
             $buildScript = ".\build_win.bat"
-            # OCCT generates paths too long for MSVC on hosted ARM64 runners.
+            # OCCT generates paths too long for MSVC on both hosted Windows architectures.
             # Subst shortens compiler-visible paths without changing the cached files.
-            if ("${{ inputs.arch }}" -eq "arm64" -and -not "${{ vars.SELF_HOSTED }}") {
+            $mappedDrive = $false
+            if (-not "${{ vars.SELF_HOSTED }}") {
               $drive = "O:"
               & subst.exe $drive "${{ github.workspace }}"
               if ($LASTEXITCODE -ne 0) { throw "Could not map short build path $drive" }
-              $deps = "${drive}/deps/build-arm64"
+              $mappedDrive = $true
+              $deps = ("${drive}/" + (Split-Path "${{ inputs.cache-path }}" -Parent)).Replace('\', '/')
               $buildScript = "${drive}\build_win.bat"
             }
-            & $buildScript -d --arch ${{ inputs.arch }} --deps-dir $deps @flags
-            if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+            try {
+              & $buildScript -d --arch ${{ inputs.arch }} --deps-dir $deps @flags
+              $buildExitCode = $LASTEXITCODE
+            } finally {
+              if ($mappedDrive) { & subst.exe $drive /D }
+            }
+            if ($buildExitCode -ne 0) { exit $buildExitCode }
         shell: pwsh
 
       - name: Build on Mac ${{ inputs.arch }}
