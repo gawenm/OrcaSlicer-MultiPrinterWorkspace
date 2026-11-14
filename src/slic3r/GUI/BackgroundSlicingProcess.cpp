@@ -223,8 +223,7 @@ std::string BackgroundSlicingProcess::output_filepath_for_project(const boost::f
 void BackgroundSlicingProcess::process_fff()
 {
     assert(m_print == m_fff_print);
-    PresetBundle& preset_bundle   = *GUI::wxGetApp().preset_bundle;
-    m_fff_print->is_BBL_printer() = preset_bundle.is_bbl_vendor();
+    const auto& project_config = m_fff_print->full_print_config();
     // BBS: add the logic to process from an existed gcode file
     if (m_print->finished()) {
         BOOST_LOG_TRIVIAL(info) << __FUNCTION__ << boost::format(" %1%: skip slicing, to process previous gcode file") % __LINE__;
@@ -261,7 +260,7 @@ void BackgroundSlicingProcess::process_fff()
         m_print->process();
         BOOST_LOG_TRIVIAL(info) << __FUNCTION__
                                 << boost::format(" %1%: after print::process, send slicing complete event to gui...") % __LINE__;
-        if (m_current_plate->get_real_filament_map_mode(preset_bundle.project_config) < FilamentMapMode::fmmManual) {
+        if (m_current_plate->get_real_filament_map_mode(project_config) < FilamentMapMode::fmmManual) {
             std::vector<int> f_maps = m_fff_print->get_filament_maps();
             m_current_plate->set_filament_maps(f_maps);
             // The engine's concrete per-filament volume assignment is merged into the print
@@ -271,7 +270,7 @@ void BackgroundSlicingProcess::process_fff()
             std::vector<int> f_volume_maps = m_fff_print->get_filament_volume_maps();
             m_current_plate->set_filament_volume_maps(f_volume_maps);
         }
-        if (m_current_plate->get_real_filament_map_mode(preset_bundle.project_config) != FilamentMapMode::fmmNozzleManual) {
+        if (m_current_plate->get_real_filament_map_mode(project_config) != FilamentMapMode::fmmNozzleManual) {
             // The engine-resolved nozzle map is read back for every non-nozzle-manual mode so the
             // plate config the next apply overlays matches the engine's written-back state
             // (otherwise the full-config diff would invalidate the g-code on every apply).
@@ -740,19 +739,26 @@ StringObjectException BackgroundSlicingProcess::validate(std::vector<StringObjec
     assert(m_print != nullptr);
     assert(m_print == m_fff_print);
 
-    m_fff_print->is_BBL_printer() = GUI::wxGetApp().preset_bundle->is_bbl_vendor();
+    const auto& profile = m_current_plate->printer_profile();
+    m_fff_print->is_BBL_printer() = profile.assigned() ? profile.is_bambu : GUI::wxGetApp().preset_bundle->is_bbl_vendor();
     return m_print->validate(warnings, collison_polygons, height_polygons);
 }
 
 // Apply config over the print. Returns false, if the new config values caused any of the already
 // processed steps to be invalidated, therefore the task will need to be restarted.
-Print::ApplyStatus BackgroundSlicingProcess::apply(const Model& model, const DynamicPrintConfig& config)
+Print::ApplyStatus BackgroundSlicingProcess::apply(const Model& model, PresetBundle& bundle)
 {
     assert(m_print != nullptr);
-    assert(config.opt_enum<PrinterTechnology>("printer_technology") == m_print->technology());
-    // TODO: add partplate config
-    DynamicPrintConfig new_config = config;
-    new_config.apply(*m_current_plate->config());
+    const auto& profile = m_current_plate->printer_profile();
+    if (!m_current_plate->printer_profile_slice_error().empty())
+        return Print::APPLY_STATUS_INVALIDATED;
+    const DynamicPrintConfig new_config = m_current_plate->build_print_config(bundle);
+    assert(new_config.opt_enum<PrinterTechnology>("printer_technology") == m_print->technology());
+    m_fff_print->is_BBL_printer() = profile.assigned() ? profile.is_bambu : bundle.is_bbl_vendor();
+    if (profile.assigned()) {
+        // Live AMS entries belong to the sidebar's machine and are never shared across profiles.
+        m_fff_print->set_extruder_filament_info({});
+    }
     Print::ApplyStatus invalidated = m_print->apply(model, new_config);
 
     // Orca: prevent resetting under gcode viewer mode

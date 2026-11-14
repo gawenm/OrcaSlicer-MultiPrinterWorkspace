@@ -13,6 +13,7 @@
 #include "DeviceErrorDialog.hpp"
 #include "MainFrame.hpp"
 #include "Plater.hpp"
+#include "PlatePrintContext.hpp"
 #include "ReleaseNote.hpp"
 #include <string>
 #include <boost/log/trivial.hpp>
@@ -2725,8 +2726,20 @@ int MachineObject::connect()
     const bool  is_bbl  = agent_id == BBL_PRINTER_AGENT_ID;
     std::string ca_file = is_bbl ? get_ca_file() : std::string();
 
+    const DynamicPrintConfig* host_config = nullptr;
+    bool assigned = false;
     if (wxTheApp && GUI::wxGetApp().preset_bundle) {
-        const auto& config = GUI::wxGetApp().preset_bundle->printers.get_edited_preset().config;
+        auto& app = GUI::wxGetApp();
+        const auto* plate = GUI::selected_print_plate(app.plater());
+        assigned = plate && plate->printer_profile().assigned();
+        host_config = GUI::plate_print_host_config(plate, *app.preset_bundle);
+        if (host_config && assigned &&
+            dev_id_from_address(host_config->opt_string("print_host"), host_config->opt_string("printhost_port")) != get_dev_id())
+            host_config = nullptr;
+    }
+
+    if (host_config) {
+        const auto& config = *host_config;
         if (port.empty())
             port = config.opt_string("printhost_port");
         if (!is_bbl)
@@ -2734,9 +2747,13 @@ int MachineObject::connect()
 
         // Refresh credentials from the matching preset for connections that bypass GUI_App::select_machine().
         const std::string print_host = config.opt_string("print_host");
-        if (printer_agent_id == MOONRAKER_PRINTER_AGENT_ID && config.opt_string("printer_agent") == MOONRAKER_PRINTER_AGENT_ID &&
+        const bool use_preset_connection = assigned ? printer_agent_id != BBL_PRINTER_AGENT_ID :
+            printer_agent_id == MOONRAKER_PRINTER_AGENT_ID && config.opt_string("printer_agent") == MOONRAKER_PRINTER_AGENT_ID;
+        if (use_preset_connection &&
             !print_host.empty() && dev_id_from_address(print_host, config.opt_string("printhost_port")) == get_dev_id()) {
             password = config.opt_string("printhost_apikey");
+            if (password.empty() && printer_agent_id != MOONRAKER_PRINTER_AGENT_ID)
+                password = "88888888";
             use_ssl  = boost::istarts_with(print_host, "https://");
             if (password != get_access_code())
                 set_access_code(password);

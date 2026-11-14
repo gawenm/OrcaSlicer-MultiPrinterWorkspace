@@ -384,7 +384,7 @@ jobs:
           fi
 
       - name: Create DMG without notary
-        if: github.ref != 'refs/heads/main' && runner.os == 'macOS' && inputs.macos-combine-only
+        if: runner.os == 'macOS' && inputs.macos-combine-only && (github.repository != 'OrcaSlicer/OrcaSlicer' || (github.ref != 'refs/heads/main' && !startsWith(github.ref, 'refs/heads/release/')))
         working-directory: ${{ github.workspace }}
         run: |
           # Load the `retry` and `create_dmg` helpers.
@@ -421,6 +421,7 @@ jobs:
         with:
           name: OrcaSlicer_Mac_universal_${{ env.ver }}
           path: ${{ github.workspace }}/OrcaSlicer_Mac_universal_${{ env.ver }}.dmg
+          if-no-files-found: error
 
       - name: Upload OrcaSlicer_profile_validator DMG mac
         if: runner.os == 'macOS' && inputs.macos-combine-only && !vars.SELF_HOSTED
@@ -547,7 +548,18 @@ jobs:
           # -l compiles with Visual Studio's clang-cl and -x builds with Ninja; --msvc --msbuild is cl under the Visual Studio generator.
           # The clang build is the one that ships: a cl build packs and uploads under _msvc names, and only the clang build is tested, checked and deployed.
           $flags = if ("${{ inputs.compiler }}" -eq "clang") { "-l", "-x" } else { "--msvc", "--msbuild" }
-          .\build_win.bat -s --tests -i --arch ${{ inputs.arch }} --build-dir $env:BUILD_DIR --deps-dir $deps @flags
+          $buildScript = ".\build_win.bat"
+          # Recreate the alias embedded in both hosted Windows dependency installations.
+          # Keep it for later packaging steps, which also consume the generated build files.
+          if (-not "${{ vars.SELF_HOSTED }}") {
+            $drive = "O:"
+            & subst.exe $drive "${{ github.workspace }}"
+            if ($LASTEXITCODE -ne 0) { throw "Could not map short build path $drive" }
+            $deps = ("${drive}/" + (Split-Path "${{ inputs.cache-path }}" -Parent)).Replace('\', '/')
+            $buildScript = "${drive}\build_win.bat"
+          }
+          & $buildScript -s --tests -i --arch ${{ inputs.arch }} --build-dir $env:BUILD_DIR --deps-dir $deps @flags
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
         shell: pwsh
 
       - name: Build system preset cache (Windows)
@@ -617,6 +629,23 @@ jobs:
             exit 1
           }
 
+      - name: Smoke-test MPW Windows installer
+        if: runner.os == 'Windows' && github.repository == 'gawenm/OrcaSlicer-MultiPrinterWorkspace' && !vars.SELF_HOSTED
+        timeout-minutes: 10
+        shell: pwsh
+        run: |
+          $installers = @(Get-ChildItem "$env:BUILD_DIR/OrcaSlicer_Windows_Installer_*.exe")
+          if ($installers.Count -ne 1) { throw "Expected exactly one Windows installer." }
+
+          $installed = Join-Path $env:RUNNER_TEMP 'mpw-install-test'
+          $result = Start-Process -Wait -PassThru -FilePath $installers[0].FullName -ArgumentList '/S', "/D=$installed"
+          if ($result.ExitCode -ne 0) { throw "Installer exited with code $($result.ExitCode)." }
+          foreach ($file in 'orca-slicer.exe', 'Uninstall.exe') {
+            if (-not (Test-Path -LiteralPath (Join-Path $installed $file) -PathType Leaf)) {
+              throw "Missing installed file: $file"
+            }
+          }
+
       # Checks the shipped files, the installer, the payload inside it (7-Zip unpacks NSIS
       # installers) and the uninstaller a silent install writes.
       - name: Verify Windows signatures
@@ -656,6 +685,7 @@ jobs:
         with:
           name: OrcaSlicer_Windows_${{ env.ver }}${{ env.ARCH_SUFFIX }}_portable
           path: ${{ github.workspace }}/${{ env.BUILD_DIR }}/OrcaSlicer
+          if-no-files-found: error
 
       - name: Upload artifacts Win installer
         if: runner.os == 'Windows' && !vars.SELF_HOSTED
@@ -663,6 +693,7 @@ jobs:
         with:
           name: OrcaSlicer_Windows_${{ env.ver }}${{ env.ARCH_SUFFIX }}
           path: ${{ github.workspace }}/${{ env.BUILD_DIR }}/OrcaSlicer*.exe
+          if-no-files-found: error
 
       - name: Upload artifacts Win PDB
         if: runner.os == 'Windows' && inputs.arch != 'arm64' && !vars.SELF_HOSTED
@@ -824,6 +855,7 @@ jobs:
         with:
           name: OrcaSlicer_Linux_ubuntu_${{ env.ubuntu-ver }}${{ env.arch_suffix }}_${{ env.ver }}
           path: "./build/OrcaSlicer_Linux_AppImage${{ env.ubuntu-ver-str }}${{ env.arch_suffix }}_${{ env.ver }}.AppImage"
+          if-no-files-found: error
 
       - name: Upload OrcaSlicer_profile_validator Ubuntu
         if: ${{ ! env.ACT && runner.os == 'Linux' && !vars.SELF_HOSTED && inputs.arch != 'aarch64' }}
@@ -900,8 +932,8 @@ jobs:
           key: ${{ env.CCACHE_ENTRY }}
 
       - name: Drop older compiler cache entries
-        if: ${{ always() && steps.ccache_save.outcome == 'success' }}
-        # A read-only token (fork PRs) cannot delete; that only costs storage.
+        if: ${{ always() && steps.ccache_save.outcome == 'success' && github.repository == 'OrcaSlicer/OrcaSlicer' }}
+        # Skip optional cache deletion on forks whose tokens lack cache-delete permissions.
         # Older means a lower run id, so two runs finishing close together keep
         # the newer entry whichever of them cleans up last.
         continue-on-error: true

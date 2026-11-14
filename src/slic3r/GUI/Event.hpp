@@ -3,12 +3,16 @@
 
 #include <array>
 #include <cstddef>
+#include <memory>
+#include <utility>
 #include <wx/debug.h>
 #include <wx/event.h>
 #include <wx/object.h>
 
 
 namespace Slic3r {
+
+class DynamicPrintConfig;
 
 namespace GUI {
 
@@ -99,15 +103,20 @@ public:
 
     LoadPrinterViewEvent(const LoadPrinterViewEvent& event)
         : wxCommandEvent(event)
-        { m_APIkey = event.m_APIkey; }
+        , m_APIkey(event.m_APIkey)
+        , m_config(event.m_config)
+        {}
 
     const wxString& GetAPIkey() const { return m_APIkey; }
     void SetAPIkey(const wxString& apikey) { m_APIkey = apikey; }
+    const std::shared_ptr<const DynamicPrintConfig>& GetConfig() const { return m_config; }
+    void SetConfig(std::shared_ptr<const DynamicPrintConfig> config) { m_config = std::move(config); }
 
     virtual wxEvent *Clone() const wxOVERRIDE { return new LoadPrinterViewEvent(*this); }
 
 private:
     wxString m_APIkey;
+    std::shared_ptr<const DynamicPrintConfig> m_config;
 
 };
 }

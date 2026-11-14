@@ -440,8 +440,61 @@ wxString PresetComboBox::get_preset_name(const Preset & preset)
     return from_u8(preset.name/* + suffix(preset)*/);
 }
 
+void PresetComboBox::set_plate_choices(const std::vector<std::string>& names, const std::string& current,
+                                       std::function<void(const std::string&)> on_select)
+{
+    GetDropDown().Hide();
+    wxWindowUpdateLocker lock(this);
+    Clear();
+    m_select_plate_preset = std::move(on_select);
+    int selected = wxNOT_FOUND;
+    auto add_preset = [&](const std::string& name) {
+        const auto* installed = m_collection->find_preset(name, false);
+        const auto label = installed && installed->name == name ? get_preset_name(*installed) : from_u8(name);
+        const int item = Append(label);
+        SetItemAlias(item, from_u8(name));
+        SetItemTooltip(item, from_u8(name));
+        if (name == current)
+            selected = item;
+    };
+    for (const auto& name : names)
+        add_preset(name);
+    if (selected == wxNOT_FOUND && !current.empty())
+        add_preset(current);
+    SetSelection(selected);
+    m_last_selected = selected;
+    SetToolTip(from_u8(current));
+}
+
+void PresetComboBox::clear_plate_choices()
+{
+    if (!has_plate_choices())
+        return;
+    GetDropDown().Hide();
+    m_select_plate_preset = {};
+    update();
+}
+
+bool PresetComboBox::select_plate_choice(wxCommandEvent& event)
+{
+    if (!has_plate_choices())
+        return false;
+    event.StopPropagation();
+    const int item = event.GetInt();
+    if (item >= 0 && size_t(item) < GetCount() && item != m_last_selected) {
+        const std::string name = GetItemAlias(item).utf8_string();
+        // The edit can refresh this list. Finish processing the popup event first.
+        CallAfter([handler = m_select_plate_preset, name] { handler(name); });
+    }
+    SetSelection(m_last_selected);
+    return true;
+}
+
 void PresetComboBox::update(std::string select_preset_name)
 {
+    if (has_plate_choices())
+        return;
+
     Freeze();
     Clear();
     invalidate_selection();
@@ -1019,6 +1072,9 @@ static void run_wizard(StartPage sp)
 
 void PlaterPresetComboBox::OnSelect(wxCommandEvent &evt)
 {
+    if (select_plate_choice(evt))
+        return;
+
     auto selected_item = evt.GetSelection();
 
     auto marker = reinterpret_cast<Marker>(this->GetClientData(selected_item));
@@ -1066,14 +1122,16 @@ void PlaterPresetComboBox::set_sync_badge(bool show)
     ShowBadge(show);
 }
 
-bool PlaterPresetComboBox::switch_to_tab()
+bool PlaterPresetComboBox::switch_to_tab(const std::string& preset_name)
 {
     Tab* tab = wxGetApp().get_tab(m_type);
     if (!tab)
         return false;
 
-    const Preset* selected_filament_preset = nullptr;
-    if (m_type == Preset::TYPE_FILAMENT)
+    if (!preset_name.empty()) {
+        if (m_collection->get_selected_preset_name() != preset_name && !tab->select_preset(preset_name))
+            return false;
+    } else if (m_type == Preset::TYPE_FILAMENT)
     {
         // Reload the editor only when it has a different preset open than this slot.
         const std::string& slot_preset_name = wxGetApp().preset_bundle->filament_presets[m_filament_idx];
@@ -1172,6 +1230,9 @@ wxString PlaterPresetComboBox::get_preset_name(const Preset& preset)
 // If an incompatible preset is selected, it is shown as well.
 void PlaterPresetComboBox::update()
 {
+    if (has_plate_choices())
+        return;
+
     if (m_type == Preset::TYPE_FILAMENT &&
         (m_preset_bundle->printers.get_edited_preset().printer_technology() == ptSLA ||
         m_preset_bundle->filament_presets.size() <= (size_t)m_filament_idx) )
@@ -1675,6 +1736,9 @@ TabPresetComboBox::TabPresetComboBox(wxWindow* parent, Preset::Type preset_type)
 
 void TabPresetComboBox::OnSelect(wxCommandEvent &evt)
 {
+    if (select_plate_choice(evt))
+        return;
+
     // Under OSX: in case of use of a same names written in different case (like "ENDER" and "Ender")
     // m_presets_choice->GetSelection() will return first item, because search in PopupListCtrl is case-insensitive.
     // So, use GetSelection() from event parameter
@@ -1726,6 +1790,9 @@ wxString TabPresetComboBox::get_preset_name(const Preset& preset)
 // If an incompatible preset is selected, it is shown as well.
 void TabPresetComboBox::update()
 {
+    if (has_plate_choices())
+        return;
+
     Freeze();
     Clear();
     invalidate_selection();
@@ -1942,8 +2009,10 @@ void TabPresetComboBox::msw_rescale()
 
 void TabPresetComboBox::update_dirty()
 {
-    // 1) Update the dirty flag of the current preset.
+    // 1) Update the dirty flag of the current project preset.
     m_collection->update_dirty();
+    if (has_plate_choices())
+        return;
 
     // 2) Update the labels.
     wxWindowUpdateLocker noUpdates(this);

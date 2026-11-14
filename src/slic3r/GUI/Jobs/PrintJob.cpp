@@ -14,6 +14,7 @@
 #include "slic3r/Utils/FileTransferUtils.hpp"
 #include "slic3r/Utils/BBLNetworkPlugin.hpp"
 #include "NetworkAgent.hpp"
+#include "IPrinterAgent.hpp"
 #include <string>
 #include "libslic3r/Utils.hpp"
 #include <boost/log/trivial.hpp>
@@ -73,6 +74,8 @@ PrintJob::PrintJob(std::string dev_id)
     m_is_calibration_task(false)
 {
     m_print_job_completed_id = m_plater->get_print_finished_event();
+    if (auto* agent = wxGetApp().getAgent())
+        m_printer_agent = agent->get_printer_agent();
 }
 
 void PrintJob::prepare()
@@ -162,7 +165,11 @@ void PrintJob::process(Ctl &ctl)
     /* display info */
     std::string msg;
     int curr_percent = 10;
-    NetworkAgent* m_agent = wxGetApp().getAgent();
+    const auto& m_agent = m_printer_agent;
+    if (!m_agent) {
+        ctl.update_status(0, _u8L("The printer agent is unavailable."));
+        return;
+    }
     AppConfig* config = wxGetApp().app_config;
 
     if (this->connection_type == "lan") {
@@ -230,7 +237,8 @@ void PrintJob::process(Ctl &ctl)
         curr_plate_idx = m_print_from_sdc_plate_idx;
     }
 
-    PartPlate* curr_plate = m_plater->get_partplate_list().get_curr_plate();
+    auto& plates = m_plater->get_partplate_list();
+    PartPlate* curr_plate = job_data.plate_idx >= 0 ? plates.get_plate(job_data.plate_idx) : plates.get_curr_plate();
     if (curr_plate) {
         this->task_bed_type = bed_type_to_gcode_string(plate_data.is_valid ? plate_data.bed_type : curr_plate->get_bed_type(true));
     }
@@ -245,7 +253,7 @@ void PrintJob::process(Ctl &ctl)
     params.password = m_access_code;
 
     // check access code and ip address
-    if (this->connection_type == "lan" && m_print_type == "from_normal") {
+    if (this->connection_type == "lan" && m_print_type == "from_normal" && m_dst_path.empty()) {
         bool emmc_ok = false;
         bool ftp_ok = false;
         if (could_emmc_print) {
@@ -326,7 +334,7 @@ void PrintJob::process(Ctl &ctl)
     }
     params.try_emmc_print         = this->could_emmc_print && !disable_emmc;
 
-    if (m_print_type == "from_sdcard_view") {
+    if (!m_dst_path.empty()) {
         params.dst_file = m_dst_path;
     }
 

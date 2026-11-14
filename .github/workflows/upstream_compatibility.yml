@@ -1,0 +1,89 @@
+name: MPW upstream compatibility check
+
+# Review-only probe. Never pushes, merges, rebases, or rewrites source branches.
+on:
+  push:
+    branches:
+      - integration/upstream-orca
+  workflow_dispatch:
+  pull_request:
+    branches:
+      - integration/upstream-orca
+    paths:
+      - '.github/workflows/upstream_compatibility.yml'
+      - 'src/**'
+      - 'deps/**'
+      - 'CMakeLists.txt'
+
+permissions:
+  contents: read
+
+concurrency:
+  group: upstream-compatibility-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  probe-upstream:
+    name: Check upstream OrcaSlicer merge conflicts
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Checkout MPW integration baseline
+        uses: actions/checkout@v4
+        with:
+          ref: integration/upstream-orca
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Fetch official OrcaSlicer
+        shell: bash
+        run: |
+          set -euo pipefail
+          git remote add upstream https://github.com/OrcaSlicer/OrcaSlicer.git
+          git fetch --no-tags upstream main
+          echo "MPW base: $(git rev-parse HEAD)"
+          echo "Upstream: $(git rev-parse FETCH_HEAD)"
+
+      - name: Test merge in runner only
+        id: merge
+        shell: bash
+        run: |
+          set -uo pipefail
+          git config user.name "MPW CI merge probe"
+          git config user.email "mpw-ci@users.noreply.github.com"
+          set +e
+          git merge --no-commit --no-ff upstream/main > merge-output.txt 2>&1
+          code=$?
+          set -e
+          cat merge-output.txt
+          {
+            echo "MPW baseline: $(git rev-parse HEAD)"
+            echo "Official upstream: $(git rev-parse upstream/main)"
+            echo "Merge exit code: $code"
+            echo
+            echo "Conflicting paths:"
+            git diff --name-only --diff-filter=U || true
+            echo
+            echo "Merge output:"
+            cat merge-output.txt
+          } > upstream-merge-report.txt
+          if [ "$code" -eq 0 ]; then
+            echo "result=clean" >> "$GITHUB_OUTPUT"
+          else
+            echo "result=conflicts" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Upload upstream compatibility report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: mpw-upstream-merge-report
+          path: |
+            upstream-merge-report.txt
+            merge-output.txt
+          if-no-files-found: warn
+
+      - name: Flag integration requiring review
+        if: steps.merge.outputs.result == 'conflicts'
+        run: |
+          echo "::error::Upstream merge has conflicts. Resolve on a separate local branch; do not overwrite the tested MPW release."
+          exit 1

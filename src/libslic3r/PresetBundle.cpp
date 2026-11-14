@@ -1016,12 +1016,16 @@ Semver PresetBundle::get_vendor_profile_version(std::string vendor_name)
 
 VendorType PresetBundle::get_current_vendor_type()
 {
+    return get_vendor_type(printers.get_edited_preset().config);
+}
+
+VendorType PresetBundle::get_vendor_type(const DynamicPrintConfig& config) const
+{
     auto        t      = VendorType::Unknown;
-    auto        config = &printers.get_edited_preset().config;
-    const auto* printer_model = config->opt<ConfigOptionString>("printer_model");
+    const auto* printer_model = config.opt<ConfigOptionString>("printer_model");
     if (printer_model == nullptr) {
         BOOST_LOG_TRIVIAL(warning) << __FUNCTION__ << ": printer_model is "
-                                   << (config->has("printer_model") ? "not a string" : "missing")
+                                   << (config.has("printer_model") ? "not a string" : "missing")
                                    << ", vendor type is Unknown";
         return t;
     }

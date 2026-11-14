@@ -13,6 +13,7 @@
 #include <list>
 #include <memory>
 #include "libslic3r/Format/bbs_3mf.hpp"
+#include "libslic3r/ObjectID.hpp"
 #include "slic3r/GUI/DeviceCore/DevDefs.h"
 #include "slic3r/GUI/Widgets/TextInput.hpp"
 #include "slic3r/GUI/Jobs/PrintJob.hpp"
@@ -314,6 +315,10 @@ class SelectMachineDialog : public DPIDialog
 private:
     int                                 m_current_filament_id{0};
     int                                 m_print_plate_idx{0};
+    DynamicPrintConfig                  m_plate_print_config;
+    std::string                         m_plate_agent_id;
+    ObjectID                            m_print_plate_id;
+    std::string                         m_plate_device_id;
     int                                 m_print_plate_total{0};
     int                                 m_timeout_count{0};
     int                                 m_print_error_code{0};
@@ -620,6 +625,11 @@ public:
     PrintDialogStatus  get_status() { return m_print_status; }
 
 private:
+    DynamicPrintConfig print_full_config() const;
+    const DynamicPrintConfig& print_project_config() const;
+    std::string print_model_id() const;
+    size_t print_filament_count() const;
+
     void EnableEditing(bool enable);
 
     /* update scroll area size*/

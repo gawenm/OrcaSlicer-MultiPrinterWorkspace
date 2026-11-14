@@ -2858,3 +2858,106 @@ SCENARIO("a rendered no-light thumbnail does not suppress the plate thumbnail", 
         }
     }
 }
+
+
+TEST_CASE("A project restores each plate's printer, process and G-code", "[3mf][PlatePrinterProfile]")
+{
+    // The importer also creates a backup tree for the reloaded model.
+    ScopedSlic3rTemporaryDir temporary_dir("orca_plate_printers_round_trip");
+
+    Model model;
+    REQUIRE(load_stl((std::string(TEST_DATA_DIR) + "/test_3mf/Prusa.stl").c_str(), &model));
+    model.add_default_instances();
+    ScopedTemporaryDir backup_dir("orca_plate_printers");
+    model.set_backup_path(backup_dir.string());
+    ScopedTemporaryFile file(".3mf");
+    const std::string path = file.string();
+
+    DynamicPrintConfig project;
+    project.apply(FullPrintConfig::defaults());
+    project.set_key_value("printer_technology", new ConfigOptionEnum<PrinterTechnology>(ptFFF));
+    project.set_key_value("printable_height", new ConfigOptionFloat(250.));
+    project.set("printer_settings_id", "Project printer", true);
+    PlateData bambu, klipper, inherited;
+    bambu.plate_index = 0;
+    klipper.plate_index = 1;
+    inherited.plate_index = 2;
+    bambu.printer_profile_origin = Vec2d(0., 0.);
+    klipper.printer_profile_origin = Vec2d(0., -280.);
+    bambu.objects_and_instances.emplace_back(0, 0);
+    bambu.printer_profile = {project, true};
+    klipper.printer_profile = {project, false};
+    const Pointfs bambu_area{{0, 0}, {256, 0}, {256, 256}, {0, 256}};
+    const Pointfs klipper_area{{0, 0}, {220, 0}, {220, 240}, {0, 240}};
+    const std::string bambu_start = "G28\nM117 \"P1S & ready\"\n";
+    const std::string klipper_start = "PRINT_START BED_TEMP=60\n; literal &quot; < test\n";
+    auto configure = [](PlatePrinterProfile& profile, const std::string& name, const Pointfs& area,
+                        double nozzle, double layer_height, const std::string& start, GCodeFlavor flavor) {
+        profile.config.set("printer_settings_id", name);
+        profile.config.set("print_settings_id", name + " process", true);
+        profile.config.set_key_value("filament_type", new ConfigOptionStrings({"PLA"}));
+        profile.config.set("layer_height", layer_height);
+        profile.config.set("machine_start_gcode", start);
+        profile.config.set("printhost_apikey", "local-credential", true);
+        profile.config.set_key_value("post_process", new ConfigOptionStrings({"local-script"}));
+        profile.config.set_key_value("printable_area", new ConfigOptionPoints(area));
+        profile.config.set_key_value("nozzle_diameter", new ConfigOptionFloats({nozzle}));
+        profile.config.set_key_value("gcode_flavor", new ConfigOptionEnum<GCodeFlavor>(flavor));
+    };
+    configure(bambu.printer_profile, "P1S", bambu_area, 0.4, 0.16, bambu_start, gcfMarlinLegacy);
+    configure(klipper.printer_profile, "CR-30", klipper_area, 0.6, 0.28, klipper_start, gcfKlipper);
+    klipper.printer_profile.config.set("belt_printer", true);
+    const std::string filament_start = "; custom filament\nM117 PETG & ready\n";
+    klipper.printer_profile.config.set_key_value("filament_start_gcode", new ConfigOptionStrings({filament_start}));
+    bambu.config.set_key_value("curr_bed_type", new ConfigOptionEnum<BedType>(btPC));
+    REQUIRE(bambu.printer_profile.valid());
+    REQUIRE(klipper.printer_profile.valid());
+
+    StoreParams params;
+    params.path = path.c_str();
+    params.model = &model;
+    params.config = &project;
+    params.plate_data_list = {&bambu, &klipper, &inherited};
+    params.strategy = SaveStrategy::SplitModel | SaveStrategy::Silence;
+    REQUIRE(store_bbs_3mf(params));
+
+    Model loaded_model;
+    DynamicPrintConfig loaded_config;
+    ConfigSubstitutionContext substitutions{ForwardCompatibilitySubstitutionRule::Enable};
+    PlateDataPtrs plates;
+    std::vector<Preset*> presets;
+    bool is_bbl_3mf = false;
+    bool is_orca_3mf = false;
+    Semver version;
+    REQUIRE(load_bbs_3mf(path.c_str(), &loaded_config, &substitutions, &loaded_model, &plates,
+                         &presets, &is_bbl_3mf, &is_orca_3mf, &version, nullptr,
+                         LoadStrategy::LoadModel | LoadStrategy::LoadConfig));
+    REQUIRE(plates.size() == 3);
+    CHECK(loaded_config.opt_string("printer_settings_id") == "Project printer");
+    const auto& first = plates[0]->printer_profile;
+    const auto& second = plates[1]->printer_profile;
+    REQUIRE(first.valid());
+    REQUIRE(second.valid());
+    CHECK(first.is_bambu);
+    CHECK_FALSE(second.is_bambu);
+    CHECK(first.config.opt_string("printer_settings_id") == "P1S");
+    CHECK(second.config.opt_string("print_settings_id") == "CR-30 process");
+    CHECK(first.config.opt_string("machine_start_gcode") == bambu_start);
+    CHECK(second.config.opt_string("machine_start_gcode") == klipper_start);
+    CHECK(first.config.option<ConfigOptionPoints>("printable_area")->values == bambu_area);
+    CHECK(second.config.option<ConfigOptionPoints>("printable_area")->values == klipper_area);
+    CHECK_THAT(first.config.opt_float("layer_height"), Catch::Matchers::WithinAbs(0.16, 1e-6));
+    CHECK_THAT(second.config.option<ConfigOptionFloats>("nozzle_diameter")->values.front(), Catch::Matchers::WithinAbs(0.6, 1e-6));
+    CHECK(second.config.opt_enum<GCodeFlavor>("gcode_flavor") == gcfKlipper);
+    CHECK(second.config.opt_bool("belt_printer"));
+    CHECK_FALSE(second.config.has("printhost_apikey"));
+    CHECK_FALSE(second.config.has("post_process"));
+    CHECK(second.config.option<ConfigOptionStrings>("filament_start_gcode")->values.front() == filament_start);
+    REQUIRE(plates[1]->printer_profile_origin.has_value());
+    CHECK_THAT(plates[1]->printer_profile_origin->y(), Catch::Matchers::WithinAbs(-280., 1e-6));
+    CHECK(plates[0]->config.opt_enum<BedType>("curr_bed_type") == btPC);
+    CHECK_FALSE(plates[2]->printer_profile.assigned());
+    release_PlateData_list(plates);
+    for (Preset* preset : presets)
+        delete preset;
+}

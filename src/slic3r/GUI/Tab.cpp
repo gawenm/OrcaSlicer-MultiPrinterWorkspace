@@ -1607,6 +1607,8 @@ void Tab::on_roll_back_value(const bool to_sys /*= true*/)
 // comparing the selected preset config with $self->{config}.
 void Tab::update_dirty()
 {
+    if (auto* print_tab = dynamic_cast<TabPrint*>(this); print_tab && print_tab->has_plate_process_config())
+        return;
     if (m_postpone_update_ui)
         return;
 
@@ -2116,6 +2118,9 @@ void Tab::on_value_change(const std::string& opt_key, const boost::any& value)
     if (wxGetApp().plater() == nullptr) {
         return;
     }
+
+    if (auto* print_tab = dynamic_cast<TabPrint*>(this); print_tab && print_tab->apply_plate_process_change(opt_key))
+        return;
 
     // The bed-area point option cannot store collision-volume syntax. Offer to
     // copy it to the volume setting while retaining the area's previous value.
@@ -3567,6 +3572,61 @@ void TabPrint::build()
 }
 
 // Reload current config (aka presets->edited_preset->config) into the UI fields.
+void TabPrint::set_plate_process_config(const DynamicPrintConfig* config, bool is_bambu)
+{
+    if (!config && !m_plate_process_config)
+        return;
+    if (config) {
+        if (!m_plate_process_config)
+            m_plate_process_config = std::make_unique<DynamicPrintConfig>();
+        *m_plate_process_config = *config;
+    }
+    m_plate_is_bambu = is_bambu;
+    // Keep the native controls bound to this plate while the project presets retain their own state.
+    auto* display_config = config ? m_plate_process_config.get() : m_config;
+    for (const auto& page : m_pages) {
+        page->set_config(display_config);
+        for (const auto& group : page->m_optgroups)
+            group->set_config(display_config);
+    }
+    if (!config)
+        m_plate_process_config.reset();
+
+    m_btn_save_preset->Enable(!config);
+    m_btn_delete_preset->Enable(!config);
+    if (m_undo_btn)
+        m_undo_btn->Enable(!config);
+    if (m_parent->get_current_tab() == this)
+        m_page_view->Enable(true);
+    reload_config();
+    m_refreshing_plate_process = true;
+    toggle_options();
+    m_refreshing_plate_process = false;
+    if (m_active_page)
+        m_active_page->update_visibility(m_mode, true);
+}
+
+const Preset* TabPrint::plate_process_preset() const
+{
+    if (!m_plate_process_config)
+        return nullptr;
+    const std::string& name = m_plate_process_config->opt_string("print_settings_id");
+    const Preset* preset = m_preset_bundle->prints.find_preset(name, false);
+    return preset && preset->name == name ? preset : nullptr;
+}
+
+bool TabPrint::apply_plate_process_change(const std::string& key)
+{
+    if (!m_plate_process_config)
+        return false;
+    auto* plater = wxGetApp().plater();
+    const std::string option_key = key.substr(0, key.find('#'));
+    const auto* value = m_plate_process_config->option(option_key);
+    if (plater && value)
+        plater->set_plate_process_option(option_key, *value);
+    return true;
+}
+
 void TabPrint::reload_config()
 {
     this->compatible_widget_reload(m_compatible_printers);
@@ -3594,13 +3654,28 @@ void TabPrint::update_description_lines()
 void TabPrint::toggle_options()
 {
     if (!m_active_page) return;
+    auto* display_config = m_plate_process_config ? m_plate_process_config.get() : m_config;
+    const auto* display_printer_config = m_plate_process_config.get();
+    DynamicPrintConfig plate_context;
+    bool is_bambu_context = m_plate_process_config ? m_plate_is_bambu : wxGetApp().preset_bundle->is_bbl_vendor();
+    if (!display_printer_config && wxGetApp().plater()) {
+        const auto* plate = wxGetApp().plater()->get_partplate_list().get_selected_plate();
+        if (plate && plate->printer_profile().assigned()) {
+            plate_context = plate->build_print_config(*wxGetApp().preset_bundle);
+            display_printer_config = &plate_context;
+            is_bambu_context = plate->printer_profile().is_bambu;
+        }
+    }
+    if (!display_printer_config && m_refreshing_plate_process)
+        display_printer_config = &m_preset_bundle->printers.get_edited_preset().config;
     // BBS: whether the preset is Bambu Lab printer
     if (m_preset_bundle) {
-        bool is_BBL_printer = wxGetApp().preset_bundle->is_bbl_vendor();
+        bool is_BBL_printer = is_bambu_context;
         m_config_manipulation.set_is_BBL_Printer(is_BBL_printer);
     }
 
-    m_config_manipulation.toggle_print_fff_options(m_config, int(intptr_t(m_extruder_switch->GetClientData())), m_type < Preset::TYPE_COUNT);
+    m_config_manipulation.toggle_print_fff_options(display_config, int(intptr_t(m_extruder_switch->GetClientData())),
+                                                   m_type < Preset::TYPE_COUNT, display_printer_config);
 
     if (m_type == Preset::TYPE_PLATE) {
         const auto &printer_config = m_preset_bundle->printers.get_edited_preset().config;
@@ -3609,7 +3684,7 @@ void TabPrint::toggle_options()
     }
 
     Field *field = m_active_page->get_field("support_style");
-    auto   support_type = m_config->opt_enum<SupportType>("support_type");
+    auto   support_type = display_config->opt_enum<SupportType>("support_type");
     if (auto choice = dynamic_cast<Choice*>(field)) {
         auto def = print_config_def.get("support_style");
         std::vector<int> enum_set_normal = {smsDefault, smsGrid, smsSnug };
@@ -3637,12 +3712,13 @@ void TabPrint::toggle_options()
     if (auto choice = dynamic_cast<Choice *>(field)) {
         bool is_belt_printer = false;
         if (m_preset_bundle) {
-            const auto *belt_opt = m_preset_bundle->printers.get_edited_preset().config.option<ConfigOptionBool>("belt_printer");
+            const auto& printer_config = display_printer_config ? *display_printer_config : m_preset_bundle->printers.get_edited_preset().config;
+            const auto *belt_opt = printer_config.option<ConfigOptionBool>("belt_printer");
             if (belt_opt)
                 is_belt_printer = belt_opt->value;
         }
         auto        def = print_config_def.get("brim_type");
-        const auto  current = m_config->opt_enum<BrimType>("brim_type");
+        const auto  current = display_config->opt_enum<BrimType>("brim_type");
         auto       &opt = const_cast<ConfigOptionDef &>(field->m_opt);
         auto        cb  = dynamic_cast<ComboBox *>(choice->window);
         // Keep the entry if it is already selected, so switching to a non-belt
@@ -3664,6 +3740,10 @@ void TabPrint::toggle_options()
             cb->SetValue(n);
         }
     }
+
+    if (m_plate_process_config)
+        if (Field* field = m_active_page->get_field("post_process"))
+            field->toggle(false);
 
     // BBL printers do not support cone wipe tower
     field = m_active_page->get_field("wipe_tower_wall_type");
@@ -3689,6 +3769,11 @@ void TabPrint::toggle_options()
 
 void TabPrint::update()
 {
+    if (m_plate_process_config) {
+        reload_config();
+        toggle_options();
+        return;
+    }
     if (m_preset_bundle->printers.get_selected_preset().printer_technology() == ptSLA)
         return; // ys_FIXME
 
@@ -3822,7 +3907,7 @@ void TabPrintModel::build()
 void TabPrintModel::set_model_config(std::map<ObjectBase *, ModelConfig *> const & object_configs)
 {
     m_object_configs = object_configs;
-    m_prints.get_selected_preset().config.apply(*m_parent_tab->m_config);
+    m_prints.get_selected_preset().config.apply(*m_parent_tab->get_config());
     update_model_config();
 }
 
@@ -3848,7 +3933,7 @@ void TabPrintModel::update_model_config()
     if (m_config_manipulation.is_applying()) {
         return;
     }
-    m_config->apply(*m_parent_tab->m_config);
+    m_config->apply(*m_parent_tab->get_config());
     if (m_type != Preset::TYPE_PLATE) {
         m_config->apply_only(*wxGetApp().plate_tab->get_config(), plate_keys);
     }
@@ -3896,14 +3981,14 @@ void TabPrintModel::update_model_config()
         m_config_manipulation.apply_null_fff_config(m_config, m_null_keys, m_object_configs);
 
         if (m_type == Preset::Type::TYPE_PLATE) {
-            // Reset m_config manually because there's no corresponding config in m_parent_tab->m_config
+            // Reset m_config manually because there's no corresponding config in m_parent_tab->get_config()
             for (auto plate_item : m_object_configs) {
                 const DynamicPrintConfig& plate_config = plate_item.second->get();
                 BedType plate_bed_type = (BedType)0;
                 PrintSequence plate_print_seq = (PrintSequence)0;
                 if (!plate_config.has("curr_bed_type")) {
                     // same as global
-                    DynamicConfig& global_cfg = m_preset_bundle->project_config;
+                    const DynamicConfig& global_cfg = *m_parent_tab->get_config();
                     if (global_cfg.has("curr_bed_type")) {
                         BedType global_bed_type = global_cfg.opt_enum<BedType>("curr_bed_type");
                         m_config->set_key_value("curr_bed_type", new ConfigOptionEnum<BedType>(global_bed_type));
@@ -4101,8 +4186,10 @@ void TabPrintModel::reload_config()
             }
             if (inull != m_null_keys.end()) m_null_keys.erase(inull);
         } else {
-            m_parent_tab->m_config->apply_only(*m_config, {k});
-            super_changed = true;
+            m_parent_tab->get_config()->apply_only(*m_config, {k});
+            auto* parent_print = dynamic_cast<TabPrint*>(m_parent_tab);
+            if (!parent_print || !parent_print->apply_plate_process_change(k))
+                super_changed = true;
         }
     }
     if (super_changed) {
@@ -4456,11 +4543,16 @@ void Tab::edit_custom_gcode(const t_config_option_key& opt_key)
 
 const std::string& Tab::get_custom_gcode(const t_config_option_key& opt_key)
 {
-    return m_config->opt_string(opt_key);
+    return get_config()->opt_string(opt_key);
 }
 
 void Tab::set_custom_gcode(const t_config_option_key& opt_key, const std::string& value)
 {
+    if (auto* print_tab = dynamic_cast<TabPrint*>(this); print_tab && print_tab->has_plate_process_config()) {
+        get_config()->set_key_value(opt_key, new ConfigOptionString(value));
+        print_tab->apply_plate_process_change(opt_key);
+        return;
+    }
     DynamicPrintConfig new_conf = *m_config;
     new_conf.set_key_value(opt_key, new ConfigOptionString(value));
     load_config(new_conf);
@@ -8390,6 +8482,9 @@ bool Tab::save_preset(std::string name /*= ""*/, bool detach, bool save_to_proje
             wxGetApp().get_tab(preset_type)->update_tab_ui();
     }
 
+    if (m_type == Preset::TYPE_PRINTER && wxGetApp().plater())
+        wxGetApp().plater()->update_plates_using_printer_preset(curr_preset_name, new_preset->name);
+
     // show() reloads the presets, so only a visible Compare dialog needs updating.
     DiffPresetDialog* diff_dialog = DiffPresetDialog::if_built();
     if (diff_dialog != nullptr && diff_dialog->IsShown())
@@ -9815,6 +9910,10 @@ ConfigOptionsGroupShp Page::new_optgroup(const wxString &title, const wxString &
     };
 
     optgroup->m_get_initial_config = [tab]() {
+        if (auto* print_tab = dynamic_cast<TabPrint*>(tab); print_tab && print_tab->has_plate_process_config()) {
+            const Preset* preset = print_tab->plate_process_preset();
+            return preset ? preset->config : *print_tab->get_config();
+        }
         DynamicPrintConfig config = static_cast<Tab*>(tab)->m_presets->get_selected_preset().config;
         return config;
     };
@@ -9825,6 +9924,8 @@ ConfigOptionsGroupShp Page::new_optgroup(const wxString &title, const wxString &
     };
 
     optgroup->have_sys_config = [tab]() {
+        if (const auto* print_tab = dynamic_cast<TabPrint*>(tab); print_tab && print_tab->has_plate_process_config())
+            return false;
         return static_cast<Tab*>(tab)->m_presets->get_selected_preset_parent() != nullptr;
     };
 

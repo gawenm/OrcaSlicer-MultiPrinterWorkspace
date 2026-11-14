@@ -7,6 +7,7 @@
 #include <exception>
 #include <optional>
 #include <vector>
+#include "libslic3r/PrintConfig.hpp"
 
 #include "Job.hpp"
 #include "libslic3r/Arrange.hpp"
@@ -56,6 +57,8 @@ class ArrangeJob : public Job
     ImexArrangeInput m_imex;
 
     arrangement::ArrangeParams params;
+    DynamicPrintConfig m_plate_config;
+    bool m_mixed_printers = false;
     int current_plate_index = 0;
     Polygon bed_poly;
     Plater *m_plater;

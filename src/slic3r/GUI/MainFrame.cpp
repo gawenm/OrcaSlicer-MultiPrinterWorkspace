@@ -102,6 +102,7 @@
 #include "../Utils/Process.hpp"
 // BBS
 #include "PartPlate.hpp"
+#include "PlatePrintContext.hpp"
 #include "Preferences.hpp"
 #include "Widgets/Button.hpp"
 #include "Widgets/ProgressDialog.hpp"
@@ -1505,11 +1506,7 @@ void MainFrame::init_tabpanel() {
     m_tabpanel->Hide();
     m_settings_dialog.set_tabpanel(m_tabpanel);
 
-#ifdef __WXMSW__
     m_tabpanel->Bind(wxEVT_BOOKCTRL_PAGE_CHANGED, [this](wxBookCtrlEvent& e) {
-#else
-    m_tabpanel->Bind(wxEVT_NOTEBOOK_PAGE_CHANGED, [this](wxBookCtrlEvent& e) {
-#endif
         // A page's own book (the Calibration page's Tabbook) emits the same event, and it propagates
         // up here. Treating it as a main tab change resets the selected tab and the undo/redo state,
         // and the SetFocus() below re-activates the main window on wxGTK, which dismisses the Speed
@@ -1547,7 +1544,13 @@ void MainFrame::init_tabpanel() {
         }
 #endif
         else if (panel == m_monitor_page) {
-            //monitor
+            // Agent switching can update the tabs. Let the book finish selecting the page first.
+            CallAfter([this] {
+                if (!wxGetApp().is_closing() && m_tabpanel->GetCurrentPage() == m_monitor_page)
+                    wxGetApp().switch_printer_agent();
+            });
+        } else if (panel == m_printer_view_page) {
+            load_printer_url();
         }
 #ifdef SLIC3R_CAD
         // Any page that is not Design takes the Design status line down with it — see
@@ -1614,7 +1617,7 @@ void MainFrame::init_tabpanel() {
     m_printer_view_page = new LazyPage<PrinterWebView>(m_tabpanel, TAB_ID_MONITOR_WEB, 50, [this](wxWindow* parent) {
         auto* view = new PrinterWebView(parent);
         if (!m_printer_url.empty())
-            view->load_url(m_printer_url, m_printer_api_key);
+            view->load_url(m_printer_url, m_printer_api_key, m_printer_view_config);
         return view;
     });
     m_lazy_pages.push_back(m_printer_view_page);
@@ -1622,8 +1625,9 @@ void MainFrame::init_tabpanel() {
         //select_tab(MainFrame::tpMonitor);
         m_printer_url     = evt.GetString();
         m_printer_api_key = evt.GetAPIkey();
+        m_printer_view_config = evt.GetConfig();
         if (PrinterWebView* view = PrinterWebView::if_built())
-            view->load_url(m_printer_url, m_printer_api_key);
+            view->load_url(m_printer_url, m_printer_api_key, m_printer_view_config);
     });
 
     m_multi_machine_page = new LazyPage<MultiMachinePage>(m_tabpanel, TAB_ID_MULTI_DEVICE, 40);
@@ -1662,16 +1666,25 @@ void MainFrame::init_tabpanel() {
 }
 
 // SoftFever
-void MainFrame::show_device(bool should_use_native) {
+void MainFrame::show_device() {
+    if (!m_monitor_page || !m_printer_view_page || !m_calibration_page || !wxGetApp().preset_bundle)
+        return;
     auto idx = -1;
 
-    const bool use_printer_agents = wxGetApp().app_config->get_bool("use_printer_agents");
+    auto& app = wxGetApp();
+    auto& bundle = *app.preset_bundle;
+    const auto* plate = selected_print_plate(m_plater);
+    const bool assigned = plate && plate->printer_profile().assigned();
+    const auto agent_id = assigned ? plate_printer_agent_id(plate, bundle) : std::string{};
+    const bool use_bambu_device_tab = assigned ? agent_id == BBL_PRINTER_AGENT_ID : bundle.use_bbl_device_tab();
+    const bool use_printer_agents = assigned ? !agent_id.empty() && agent_id != ORCA_PRINTER_AGENT_ID && !use_bambu_device_tab :
+        app.app_config->get_bool("use_printer_agents");
+    const bool should_use_native = use_bambu_device_tab || use_printer_agents;
 
     // The web Device page is the extra tab printer-agents mode shows alongside the native one.
     // Printers that drive the native Bambu device tab have nothing to put in it, so they don't
     // get it — otherwise a Bambu user sees two Device tabs, one of them permanently empty.
-    const bool want_web_device_tab = use_printer_agents && wxGetApp().preset_bundle != nullptr &&
-                                     !wxGetApp().preset_bundle->use_bbl_device_tab();
+    const bool want_web_device_tab = use_printer_agents && !use_bambu_device_tab;
 
     // Remove the extra page before switching to any layout that shouldn't have it.
     if (!want_web_device_tab) {
@@ -2228,6 +2241,9 @@ wxString print_select_type_label(MainFrame::PrintSelectType type)
 
 std::vector<MainFrame::PrintSelectType> MainFrame::available_print_actions() const
 {
+    if (m_plater && m_plater->get_partplate_list().has_printer_profiles())
+        return {ePrintPlate, eExportGcode};
+
     std::vector<PrintSelectType> actions;
     const auto preset_bundle      = wxGetApp().preset_bundle;
     const bool use_printer_agents = wxGetApp().app_config->get_bool("use_printer_agents");
@@ -2717,6 +2733,10 @@ void MainFrame::update_side_button_style()
 
 void MainFrame::update_slice_print_status(SlicePrintEventType event, bool can_slice, bool can_print)
 {
+    if (m_plater && m_plater->get_partplate_list().has_printer_profiles() &&
+        m_print_select != ePrintPlate && m_print_select != eExportGcode)
+        set_print_button_to_default(ePrintPlate);
+
     bool enable_print = true, enable_slice = true;
 
     if (!can_slice)
@@ -4644,23 +4664,38 @@ void MainFrame::load_url(wxString url)
     wxQueueEvent(this, evt);
 }
 
-void MainFrame::load_printer_url(wxString url, wxString apikey)
+void MainFrame::load_printer_url(wxString url, wxString apikey, const DynamicPrintConfig* config)
 {
-    BOOST_LOG_TRIVIAL(trace) << "load_printer_url:" << url;
     auto evt = new LoadPrinterViewEvent(EVT_LOAD_PRINTER_URL, this->GetId());
     evt->SetString(url);
     evt->SetAPIkey(apikey);
+    if (config != nullptr) {
+        auto connection = std::make_shared<DynamicPrintConfig>();
+        connection->apply_only(*config, PhysicalPrinter::printer_options());
+        if (const auto* model = config->option("printer_model"))
+            connection->set_key_value("printer_model", model->clone());
+        evt->SetConfig(std::move(connection));
+    }
     wxQueueEvent(this, evt);
 }
 
 void MainFrame::load_printer_url()
 {
+    if (!wxGetApp().preset_bundle)
+        return;
     PresetBundle &preset_bundle = *wxGetApp().preset_bundle;
-    if (preset_bundle.use_bbl_device_tab() && !wxGetApp().app_config->get_bool("use_printer_agents"))
+    const auto* plate = selected_print_plate(m_plater);
+    const bool assigned = plate && plate->printer_profile().assigned();
+    if (!assigned && preset_bundle.use_bbl_device_tab() && !wxGetApp().app_config->get_bool("use_printer_agents"))
         return;
 
-    auto     cfg = preset_bundle.printers.get_edited_preset().config;
-    if (cfg.opt_string("print_host").empty()) {
+    const auto* local_config = plate_print_host_config(plate, preset_bundle);
+    if (local_config == nullptr) {
+        load_printer_url(file_url_from_path(boost::filesystem::path(resources_dir()) / "web/orca/missing_connection.html"));
+        return;
+    }
+    auto cfg = *local_config;
+    if (!assigned && cfg.opt_string("print_host").empty()) {
         if (auto *device_manager = wxGetApp().getDeviceManager()) {
             auto *machine = device_manager->get_selected_machine();
             if (!machine) {
@@ -4674,12 +4709,13 @@ void MainFrame::load_printer_url()
     }
     wxString url = from_u8(PrintHost::get_print_host_webui(&cfg));
     wxString apikey;
-    const auto host_type = cfg.option<ConfigOptionEnum<PrintHostType>>("host_type")->value;
-    if (cfg.has("printhost_apikey") && host_type != htSimplyPrint)
+    const auto* host_type = cfg.option<ConfigOptionEnum<PrintHostType>>("host_type");
+    if (!url.empty() && cfg.has("printhost_apikey") && (!host_type || host_type->value != htSimplyPrint))
         apikey = cfg.opt_string("printhost_apikey");
-    if (!url.empty()) {
-        load_printer_url(url, apikey);
-    }
+    if (url.empty())
+        load_printer_url(file_url_from_path(boost::filesystem::path(resources_dir()) / "web/orca/missing_connection.html"));
+    else
+        load_printer_url(url, apikey, &cfg);
 }
 
 bool MainFrame::is_printer_view() const { return m_tabpanel->GetSelectedPageName() == TAB_ID_MONITOR; }

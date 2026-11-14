@@ -132,6 +132,7 @@
 #include <wx/spinctrl.h>
 #include <wx/stattext.h>
 #include <wx/button.h>
+#include <wx/choicdlg.h>
 #include <wx/bmpcbox.h>
 #include <wx/display.h>
 #include <wx/statbox.h>
@@ -217,6 +218,7 @@
 #include "UVEditorCanvas.hpp"
 #include "3DBed.hpp"
 #include "PartPlate.hpp"
+#include "PlatePrintContext.hpp"
 #include "BeltPurgeTower.hpp"
 #include "IMEXFilamentPickerPopover.hpp"
 #include "Camera.hpp"
@@ -919,7 +921,7 @@ struct Sidebar::priv
     ExtruderGroup *single_extruder = nullptr;
 
     int  FromDIP(int n) { return plater->FromDIP(n); }
-    void layout_printer(bool isBBL, bool isDual);
+    void layout_printer(bool isBBL, bool isDual, const DynamicPrintConfig* plate_config = nullptr, bool is_bambu = false);
 
     void flush_printer_sync(bool restart = false);
 
@@ -927,6 +929,14 @@ struct Sidebar::priv
     std::vector<PlaterPresetComboBox*> combos_filament;
     int editing_filament = -1;
     wxBoxSizer *sizer_filaments = nullptr;
+    wxBoxSizer *sizer_plate_filaments = nullptr;
+    std::vector<PlaterPresetComboBox*> plate_filament_combos;
+    std::optional<ObjectID> displayed_plate;
+    DynamicPrintConfig displayed_plate_profile;
+    DynamicPrintConfig displayed_plate_overrides;
+    bool displayed_plate_is_bambu = false;
+    std::vector<BedType> plate_bed_types;
+    bool refreshing_project_bed = false;
 
     //BBS Sidebar widgets
     wxPanel* m_panel_print_title;
@@ -1040,7 +1050,7 @@ struct Sidebar::priv
 #endif
 };
 
-void Sidebar::priv::layout_printer(bool isBBL, bool isDual)
+void Sidebar::priv::layout_printer(bool isBBL, bool isDual, const DynamicPrintConfig* plate_config, bool is_bambu)
 {
     // Printer - preset
     if (auto sizer = static_cast<wxBoxSizer *>(panel_printer_preset->GetSizer());
@@ -1113,10 +1123,11 @@ void Sidebar::priv::layout_printer(bool isBBL, bool isDual)
 
     // ORCA show plate type combo box only when its supported
     PresetBundle &preset_bundle = *wxGetApp().preset_bundle;
-    const auto& cfg = preset_bundle.printers.get_edited_preset().config;
+    const auto& cfg = plate_config ? *plate_config : preset_bundle.printers.get_edited_preset().config;
+    const bool bambu = plate_config ? is_bambu : preset_bundle.is_bbl_vendor();
     // Orca: we use preset_bundle.is_bbl_vendor() instead of isBBL to determine if the plate type combo box should be shown
     // ref: https://github.com/OrcaSlicer/OrcaSlicer/pull/11610#discussion_r2607411847
-    panel_printer_bed->Show(preset_bundle.is_bbl_vendor() || cfg.opt_bool("support_multi_bed_types"));
+    panel_printer_bed->Show(bambu || cfg.opt_bool("support_multi_bed_types"));
 
     extruder_dual_sizer->Show(isDual);
 
@@ -1129,7 +1140,7 @@ void Sidebar::priv::layout_printer(bool isBBL, bool isDual)
 
         // ORCA: a non-Bambu printer with several extruders lists one nozzle row per tool; Bambu's own
         // multi-extruder printers keep the left/right pair above.
-        const bool multi_extruder_rows = !preset_bundle.is_bbl_vendor() && extruder_count > 1;
+        const bool multi_extruder_rows = !bambu && extruder_count > 1;
         const auto &diameters = cfg.option<ConfigOptionFloats>("nozzle_diameter")->values;
         const bool mixed_diameters = std::any_of(diameters.begin(), diameters.end(), [&diameters](double value) {
             return get_diameter_string(value) != get_diameter_string(diameters.front());
@@ -1148,7 +1159,7 @@ void Sidebar::priv::layout_printer(bool isBBL, bool isDual)
 
     // ORCA ensure printer section is visible after changing printer from printer selection dialog
     // this will inform user on printer change when printer section is collapsed
-    if (m_panel_printer_content){
+    if (!plate_config && m_panel_printer_content){
         bool isShown = m_panel_printer_content->IsShown();
         if(!isShown && m_text_printer_settings){
             m_text_printer_settings->SetLabel(_L("Printer")); // ensure title returns to default state
@@ -2344,6 +2355,8 @@ void Sidebar::priv::update_extruder_separator_icon(bool show, bool ready)
 
 bool Sidebar::priv::sync_extruder_list(bool &only_external_material, bool is_manual)
 {
+    if (const auto* plate = selected_print_plate(plater); plate && plate->printer_profile().assigned())
+        return false;
     MachineObject *obj = wxGetApp().getDeviceManager()->get_selected_machine();
     auto           printer_name = plater->get_selected_printer_name_in_combox();
     BOOST_LOG_TRIVIAL(info) << __FUNCTION__ << __LINE__ << " begin sync_extruder_list";
@@ -2542,7 +2555,7 @@ void Sidebar::priv::update_sync_status(const MachineObject *obj)
         m_printer_bbl_sync->SetBitmap_("printer_sync_not");
     };
 
-    if (!obj || !obj->is_info_ready()) {
+    if (displayed_plate || !obj || !obj->is_info_ready()) {
         clear_all_sync_status();
         return;
     }
@@ -2771,8 +2784,8 @@ void Sidebar::update_sync_ams_btn_enable(wxUpdateUIEvent &e)
      if (m_last_slice_state != p->plater->is_background_process_slicing()) {
          m_last_slice_state = p->plater->is_background_process_slicing();
          //btn_sync->Enable(!m_last_slice_state);
-         p->m_printer_bbl_sync->Enable(!m_last_slice_state);
-         ams_btn->Enable(!m_last_slice_state);
+         p->m_printer_bbl_sync->Enable(!p->displayed_plate && !m_last_slice_state);
+         ams_btn->Enable(!p->displayed_plate && !m_last_slice_state);
          Refresh();
      }
  }
@@ -2938,12 +2951,24 @@ Sidebar::Sidebar(Plater *parent)
         auto printer_preset_hovered = std::make_shared<std::unordered_set<wxWindow*>>();
 
         p->btn_edit_printer = new ScalableButton(p->panel_printer_preset, wxID_ANY, "edit");
-        p->btn_edit_printer->SetToolTip(_L("Click to edit preset"));
+        p->btn_edit_printer->SetToolTip(_L("Edit the printer preset shared by this row. Shift-click to edit the project printer preset."));
         p->btn_edit_printer->Hide(); // hide for first launch
         p->btn_edit_printer->Bind(wxEVT_BUTTON, [this, panel_color, printer_preset_hovered](wxCommandEvent){
             p->editing_filament = -1;
-            if (p->combo_printer->switch_to_tab())
+            const auto* plate = selected_print_plate(p->plater);
+            if (!wxGetKeyState(WXK_SHIFT) && plate && plate->printer_profile().assigned()) {
+                const auto name = plate->printer_profile().config.opt_string("printer_settings_id");
+                const auto& printers = wxGetApp().preset_bundle->printers;
+                const auto* preset = printers.find_preset(name, false);
+                if (!preset || preset->name != name || preset->is_external || preset->is_project_embedded) {
+                    show_error(p->plater, _L("Install this row's printer preset or assign an installed preset before editing."));
+                    return;
+                }
+                if (!p->combo_printer->switch_to_tab(name))
+                    return;
+            } else if (p->combo_printer->switch_to_tab()) {
                 p->editing_filament = 0;
+            }
             // ORCA: FIX crash on wxGTK, directly modifying UI (self->Hide() / parent->Layout()) inside a button event can crash because callbacks are not re-entrant, leaving widgets in an inconsistent state
             wxGetApp().CallAfter([this, panel_color, printer_preset_hovered]() {
                 // ORCA clicking edit button not triggers wxEVT_KILL_FOCUS wxEVT_LEAVE_WINDOW make changes manually to prevent stucked colors when opening printer settings
@@ -3119,9 +3144,29 @@ Sidebar::Sidebar(Plater *parent)
         reset_bed_type_combox_choices(true);
 
         p->combo_printer_bed->Bind(wxEVT_COMBOBOX, [this](auto &e) {
-            auto image_path        = get_cur_select_bed_image();
+            auto* plate = selected_print_plate(p->plater);
+            const bool assigned = plate && plate->printer_profile().assigned();
+            const bool local = plate && (assigned || (!p->refreshing_project_bed && plate->get_bed_type() != btDefault));
+            if (local) {
+                const bool correct_context = !assigned || (p->displayed_plate && *p->displayed_plate == plate->id());
+                const BedType bed_type = get_cur_select_bed_type();
+                const auto& types = assigned ? p->plate_bed_types : m_cur_combox_bed_types;
+                const auto saved = std::find(types.begin(), types.end(), plate->get_bed_type(true));
+                if (saved != types.end())
+                    p->combo_printer_bed->SetSelection(int(saved - types.begin()));
+                if (correct_context && bed_type != btDefault && plate->get_bed_type(true) != bed_type) {
+                    // A successful change rebuilds the bed popup.
+                    CallAfter([this, plate_id = plate->id(), bed_type] {
+                        auto* current = selected_print_plate(p->plater);
+                        if (current && current->id() == plate_id)
+                            p->plater->set_plate_bed_type(bed_type);
+                    });
+                }
+            }
+            const auto image_path = get_cur_select_bed_image();
             p->image_printer_bed->SetBitmap(create_scaled_bitmap(image_path, this, PRINTER_THUMBNAIL_SIZE.GetHeight()));
-            e.Skip();
+            if (!local)
+                e.Skip();
         });
 
         // ORCA paint whole combobox on focus
@@ -3425,6 +3470,11 @@ Sidebar::Sidebar(Plater *parent)
     //bSizer_filament_content->Add(p->sizer_filaments, 1, wxALIGN_CENTER | wxALL);
     wxSizer *sizer_filaments2 = new wxBoxSizer(wxVERTICAL);
     sizer_filaments2->Add(p->sizer_filaments, 0, wxEXPAND, 0);
+    p->sizer_plate_filaments = new wxBoxSizer(wxHORIZONTAL);
+    p->sizer_plate_filaments->Add(new wxBoxSizer(wxVERTICAL), 1, wxEXPAND);
+    p->sizer_plate_filaments->Add(new wxBoxSizer(wxVERTICAL), 1, wxEXPAND);
+    sizer_filaments2->Add(p->sizer_plate_filaments, 0, wxEXPAND, 0);
+    sizer_filaments2->Hide(p->sizer_plate_filaments);
     p->m_panel_filament_content->SetSizer(sizer_filaments2);
     p->m_panel_filament_content->Layout();
     
@@ -3559,9 +3609,8 @@ Sidebar::Sidebar(Plater *parent)
     // ---- End filament area ----
     }
 
-    {
-    //add project title
     auto params_panel = ((MainFrame*)parent->GetParent())->m_param_panel;
+    //add project title
     if (params_panel) {
         params_panel->get_top_panel()->Reparent(p->scrolled);
         auto spliter_1 = new ::StaticLine(p->scrolled);
@@ -3573,6 +3622,7 @@ Sidebar::Sidebar(Plater *parent)
         scrolled_sizer->Add(spliter_2, 0, wxEXPAND);
     }
 
+    {
     //add project content
     p->sizer_params = new wxBoxSizer(wxVERTICAL);
 
@@ -3708,10 +3758,11 @@ void Sidebar::create_printer_preset()
     }
 }
 
-void Sidebar::init_filament_combo(PlaterPresetComboBox **combo, const int filament_idx)
+void Sidebar::init_filament_combo(PlaterPresetComboBox **combo, int filament_idx, bool plate_local)
 {
     *combo = new PlaterPresetComboBox(p->m_panel_filament_content, Slic3r::Preset::TYPE_FILAMENT);
     (*combo)->set_filament_idx(filament_idx);
+    auto* columns = plate_local ? p->sizer_plate_filaments : p->sizer_filaments;
 
     auto combo_and_btn_sizer = new wxBoxSizer(wxHORIZONTAL);
 
@@ -3743,7 +3794,24 @@ void Sidebar::init_filament_combo(PlaterPresetComboBox **combo, const int filame
     edit_btn->SetToolTip(_L("Click to edit preset"));
 
     PlaterPresetComboBox* combobox = (*combo);
-    edit_btn->Bind(wxEVT_BUTTON, [this, edit_btn, combobox, filament_idx](wxCommandEvent) {
+    edit_btn->Bind(wxEVT_BUTTON, [this, edit_btn, combobox, filament_idx, plate_local](wxCommandEvent) {
+        if (plate_local) {
+            const auto* plate = selected_print_plate(p->plater);
+            if (!plate || !plate->printer_profile().assigned())
+                return;
+            const auto* names = plate->printer_profile().config.option<ConfigOptionStrings>("filament_settings_id");
+            if (!names || size_t(filament_idx) >= names->values.size())
+                return;
+            const auto name = names->values[size_t(filament_idx)];
+            const auto* preset = wxGetApp().preset_bundle->filaments.find_preset(name, false);
+            if (!preset || preset->name != name) {
+                show_error(p->plater, _L("Install this plate's filament preset before editing."));
+                return;
+            }
+            p->editing_filament = -1;
+            combobox->switch_to_tab(name);
+            return;
+        }
         bool single_or_bbl     = should_show_SEMM_buttons();
         bool is_multi_material = p->combos_filament.size() > 1;
         if(single_or_bbl && is_multi_material) {
@@ -3772,11 +3840,13 @@ void Sidebar::init_filament_combo(PlaterPresetComboBox **combo, const int filame
 
     // BBS:  filament double columns
     auto side = filament_idx % 2;
-    auto /***/sizer_filaments = this->p->sizer_filaments->GetItem(side)->GetSizer();
+    auto /***/sizer_filaments = columns->GetItem(side)->GetSizer();
     if (side == 1 && filament_idx > 1) sizer_filaments->Remove(filament_idx / 2);
     sizer_filaments->Add(combo_and_btn_sizer, 1, wxEXPAND);
+    if (p->displayed_plate && !plate_local)
+        combo_and_btn_sizer->ShowItems(false);
     if (side == 0 && filament_idx > 0) {
-        sizer_filaments = this->p->sizer_filaments->GetItem(1)->GetSizer();
+        sizer_filaments = columns->GetItem(1)->GetSizer();
         sizer_filaments->AddStretchSpacer(1);
     }
 }
@@ -3818,6 +3888,8 @@ void Sidebar::update_all_preset_comboboxes(bool update_filament_combos)
     auto cfg = preset_bundle.printers.get_edited_preset().config;
     const bool use_printer_agents = wxGetApp().app_config->get_bool("use_printer_agents");
     const bool use_native_device_tab = preset_bundle.use_bbl_device_tab() || use_printer_agents;
+    const auto* plate = selected_print_plate(p->plater);
+    const bool assigned = plate && plate->printer_profile().assigned();
 
     if (preset_bundle.use_bbl_network()) {
         //only show connection button for not-BBL printer
@@ -3845,6 +3917,7 @@ void Sidebar::update_all_preset_comboboxes(bool update_filament_combos)
         auto print_btn_type = cfg.opt_bool("use_3mf") ? MainFrame::PrintSelectType::eExportSlicedFile
                                                       : MainFrame::PrintSelectType::eExportGcode;
         wxString url = from_u8(PrintHost::get_print_host_webui(&cfg));
+        const bool has_web_url = !url.empty();
         wxString apikey;
         if(url.empty())
             url = file_url_from_path(boost::filesystem::path(resources_dir()) / "web/orca/missing_connection.html");
@@ -3857,13 +3930,13 @@ void Sidebar::update_all_preset_comboboxes(bool update_filament_combos)
                                  : MainFrame::PrintSelectType::eSendGcode;
         }
 
-        if (use_printer_agents)
+        if (!assigned && use_printer_agents)
             p_mainframe->load_printer_url();
-        else if (!use_native_device_tab)
-            p_mainframe->load_printer_url(url, apikey);
+        else if (!assigned && !use_native_device_tab)
+            p_mainframe->load_printer_url(url, apikey, has_web_url ? &cfg : nullptr);
 
 
-        p_mainframe->set_print_button_to_default(print_btn_type);
+        p_mainframe->set_print_button_to_default(assigned ? MainFrame::PrintSelectType::ePrintPlate : print_btn_type);
 
     }
 
@@ -3879,39 +3952,41 @@ void Sidebar::update_all_preset_comboboxes(bool update_filament_combos)
 
     //p->m_staticText_filament_settings->Update();
 
-    if (is_bbl_vendor || cfg.opt_bool("support_multi_bed_types")) {
-        p->combo_printer_bed->Enable();
-        // Orca: don't update bed type if loading project
-        if (!p->plater->is_loading_project()) {
-            bool has_changed = reset_bed_type_combox_choices();
-            bool flag         = m_begin_sync_printer_status && !has_changed;
-            if (!(flag)) {
-                auto str_bed_type = wxGetApp().app_config->get_printer_setting(wxGetApp().preset_bundle->printers.get_selected_preset_name(),
-                                                                               "curr_bed_type");
-                if (!str_bed_type.empty()) {
-                    int bed_type_value = atoi(str_bed_type.c_str());
-                    if (bed_type_value <= 0 || bed_type_value >= btCount) {
-                        bed_type_value = preset_bundle.printers.get_edited_preset().get_default_bed_type(&preset_bundle);
+    if (!p->displayed_plate) {
+        if (is_bbl_vendor || cfg.opt_bool("support_multi_bed_types")) {
+            p->combo_printer_bed->Enable();
+            // Orca: don't update bed type if loading project
+            if (!p->plater->is_loading_project()) {
+                bool has_changed = reset_bed_type_combox_choices();
+                bool flag         = m_begin_sync_printer_status && !has_changed;
+                if (!(flag)) {
+                    auto str_bed_type = wxGetApp().app_config->get_printer_setting(wxGetApp().preset_bundle->printers.get_selected_preset_name(),
+                                                                                   "curr_bed_type");
+                    if (!str_bed_type.empty()) {
+                        int bed_type_value = atoi(str_bed_type.c_str());
+                        if (bed_type_value <= 0 || bed_type_value >= btCount) {
+                            bed_type_value = preset_bundle.printers.get_edited_preset().get_default_bed_type(&preset_bundle);
+                        }
+
+                       set_bed_type_accord_combox((BedType) bed_type_value);
+                    } else {
+                        BedType bed_type = preset_bundle.printers.get_edited_preset().get_default_bed_type(&preset_bundle);
+                        set_bed_type_accord_combox(bed_type);
                     }
-
-                   set_bed_type_accord_combox((BedType) bed_type_value);
                 } else {
-                    BedType bed_type = preset_bundle.printers.get_edited_preset().get_default_bed_type(&preset_bundle);
-                    set_bed_type_accord_combox(bed_type);
+                    BOOST_LOG_TRIVIAL(debug) << __FUNCTION__ << ":no need reset_bed_type_combox_choices";
                 }
-            } else {
-                BOOST_LOG_TRIVIAL(debug) << __FUNCTION__ << ":no need reset_bed_type_combox_choices";
             }
+        } else {
+            // m_bed_type_list->SelectAndNotify(btPEI - 1);
+            BedType bed_type = preset_bundle.printers.get_edited_preset().get_default_bed_type(&preset_bundle);
+            set_bed_type_accord_combox(bed_type);
+            p->combo_printer_bed->Disable();
         }
-    } else {
-        // m_bed_type_list->SelectAndNotify(btPEI - 1);
-        BedType bed_type = preset_bundle.printers.get_edited_preset().get_default_bed_type(&preset_bundle);
-        set_bed_type_accord_combox(bed_type);
-        p->combo_printer_bed->Disable();
-    }
 
-    // ORCA Hide plate selector if not supported by printer
-    p->panel_printer_bed->Show(is_bbl_vendor || cfg.opt_bool("support_multi_bed_types"));
+        // ORCA Hide plate selector if not supported by printer
+        p->panel_printer_bed->Show(is_bbl_vendor || cfg.opt_bool("support_multi_bed_types"));
+    }
 
     // Update the print choosers to only contain the compatible presets, update the dirty flags.
     //BBS
@@ -3930,8 +4005,420 @@ void Sidebar::update_all_preset_comboboxes(bool update_filament_combos)
         update_printer_thumbnail();
     }
 
-    p_mainframe->show_device(use_native_device_tab);
+    p_mainframe->show_device();
     p_mainframe->m_tabpanel->SetSelection(p_mainframe->m_tabpanel->GetSelection());
+}
+
+static std::vector<std::string> plate_preset_names(const PresetCollection& presets, const PresetWithVendorProfile& printer,
+                                                  const PresetWithVendorProfile* process = nullptr)
+{
+    std::vector<std::string> names;
+    for (const auto& preset : presets) {
+        if (!preset.is_visible || preset.is_default)
+            continue;
+        const auto candidate = presets.get_preset_with_vendor_profile(preset);
+        if (preset.type == Preset::TYPE_PRINTER ? preset.printer_technology() == ptFFF :
+            is_compatible_with_printer(candidate, printer) &&
+            (!process || is_compatible_with_print(candidate, *process, printer)))
+            names.push_back(preset.name);
+    }
+    return names;
+}
+
+void Sidebar::refresh_plate_presets(bool preset_catalog_changed)
+{
+    if (wxGetApp().plater() != p->plater || !wxGetApp().preset_bundle ||
+        wxGetApp().is_closing() || p->plater->is_loading_project())
+        return;
+    auto* plate = selected_print_plate(p->plater);
+    const bool assigned = plate && plate->printer_profile().assigned();
+    const auto* profile = assigned ? &plate->printer_profile() : nullptr;
+    auto* print_tab = dynamic_cast<TabPrint*>(wxGetApp().get_tab(Preset::TYPE_PRINT));
+    if (!preset_catalog_changed && assigned && p->displayed_plate && *p->displayed_plate == plate->id() &&
+        p->displayed_plate_is_bambu == profile->is_bambu &&
+        p->displayed_plate_profile == profile->config && p->displayed_plate_overrides == *plate->config() &&
+        p->combo_printer->has_plate_choices() && print_tab && print_tab->get_combo_box() &&
+        print_tab->get_combo_box()->has_plate_choices() && !p->plate_filament_combos.empty() &&
+        std::all_of(p->plate_filament_combos.begin(), p->plate_filament_combos.end(),
+                    [](const PlaterPresetComboBox* combo) { return combo && combo->has_plate_choices(); }))
+        return;
+
+    auto& bundle = *wxGetApp().preset_bundle;
+    auto* filament_sizer = p->m_panel_filament_content->GetSizer();
+    const bool was_assigned = p->displayed_plate.has_value();
+    const bool switching_context = was_assigned != assigned;
+    if (switching_context) {
+        filament_sizer->Show(p->sizer_filaments, !assigned);
+        filament_sizer->Show(p->sizer_plate_filaments, assigned);
+        for (wxWindow* button : std::initializer_list<wxWindow*>{p->m_printer_connect, p->m_printer_bbl_sync,
+            p->m_bpButton_ams_filament,
+            p->m_flushing_volume_btn, p->m_purge_mode_btn})
+            button->Enable(!assigned);
+        if (assigned) {
+            for (wxWindow* window : std::initializer_list<wxWindow*>{p->m_btn_add_mixed_filament,
+                p->m_panel_mixed_title, p->m_mixed_scroll_area, p->m_panel_mixed_warning})
+                window->Hide();
+        }
+    }
+
+    if (!assigned) {
+        if (was_assigned) {
+            p->displayed_plate.reset();
+            p->displayed_plate_profile.clear();
+            p->displayed_plate_overrides.clear();
+            p->combo_printer->clear_plate_choices();
+            if (print_tab && print_tab->get_combo_box()) {
+                print_tab->get_combo_box()->clear_plate_choices();
+                print_tab->set_plate_process_config(nullptr);
+            }
+            p->combo_printer_bed->GetDropDown().Hide();
+            m_last_combo_bedtype_count = 0;
+            reset_bed_type_combox_choices(true);
+            p->combo_printer_bed->Enable(bundle.is_bbl_vendor() ||
+                bundle.printers.get_edited_preset().config.opt_bool("support_multi_bed_types"));
+            wxGetApp().mainframe->show_device();
+        }
+
+        const auto bed = plate ? plate->get_bed_type(true) : btDefault;
+        auto found = std::find(m_cur_combox_bed_types.begin(), m_cur_combox_bed_types.end(), bed);
+        if (found != m_cur_combox_bed_types.end()) {
+            const int index = int(found - m_cur_combox_bed_types.begin());
+            if (was_assigned || p->combo_printer_bed->GetSelection() != index) {
+                p->combo_printer_bed->SetSelection(index);
+                const auto image = get_cur_select_bed_image();
+                if (!image.empty())
+                    p->image_printer_bed->SetBitmap(create_scaled_bitmap(image, this, PRINTER_THUMBNAIL_SIZE.GetHeight()));
+            }
+        }
+        if (was_assigned) {
+            const bool expanded = p->m_panel_printer_content->IsShown();
+            refresh_printer_controls(bundle);
+            p->m_panel_printer_content->Show(expanded);
+            if (!expanded)
+                p->m_text_printer_settings->SetLabel(_L("Printer") + "  |  " + p->combo_printer->GetValue());
+            update_printer_thumbnail();
+            show_SEMM_buttons();
+            update_mixed_filament_list();
+            update_filaments_area_height();
+            p->scrolled->Layout();
+        }
+        return;
+    }
+
+    p->displayed_plate = plate->id();
+    p->displayed_plate_profile = profile->config;
+    p->displayed_plate_overrides = *plate->config();
+    p->displayed_plate_is_bambu = profile->is_bambu;
+    wxGetApp().mainframe->show_device();
+    if (switching_context)
+        p->update_sync_status(nullptr);
+    auto config = plate->build_print_config(bundle);
+    // Older projects may have captured a subset of options. Fill missing fields
+    // for display without changing the saved plate.
+    for (const auto& key : Preset::print_options())
+        config.option(key, true);
+    const auto printer_name = config.opt_string("printer_settings_id", true);
+    const auto process_name = config.opt_string("print_settings_id", true);
+    Preset printer(Preset::TYPE_PRINTER, printer_name);
+    if (const auto* installed = bundle.printers.find_preset(printer_name, false);
+        installed && installed->name == printer_name)
+        printer = *installed;
+    printer.config.apply(config);
+    Preset process(Preset::TYPE_PRINT, process_name);
+    if (const auto* installed = bundle.prints.find_preset(process_name, false);
+        installed && installed->name == process_name)
+        process = *installed;
+    process.config.apply(config);
+    const auto printer_context = bundle.printers.get_preset_with_vendor_profile(printer);
+    const auto process_context = bundle.prints.get_preset_with_vendor_profile(process);
+
+    auto change_preset = [this, plate_id = plate->id()](Preset::Type type, size_t slot = 0) {
+        return [this, plate_id, type, slot](const std::string& name) {
+            auto* current = selected_print_plate(p->plater);
+            if (current && current->id() == plate_id && current->printer_profile().assigned())
+                p->plater->set_plate_preset(type, name, slot);
+        };
+    };
+
+    p->combo_printer->set_plate_choices(plate_preset_names(bundle.printers, printer_context),
+        printer_name, change_preset(Preset::TYPE_PRINTER));
+    if (!p->m_panel_printer_content->IsShown())
+        p->m_text_printer_settings->SetLabel(_L("Printer") + "  |  " + p->combo_printer->GetValue());
+    update_printer_thumbnail();
+
+    const auto printer_model = config.opt_string("printer_model", true);
+    const VendorProfile::PrinterModel* model = nullptr;
+    for (const auto& entry : bundle.vendors) {
+        const auto& models = entry.second.models;
+        const auto found = std::find_if(models.begin(), models.end(), [&printer_model](const auto& candidate) {
+            return candidate.name == printer_model;
+        });
+        if (found != models.end()) {
+            model = &*found;
+            break;
+        }
+    }
+    p->combo_printer_bed->GetDropDown().Hide();
+    p->combo_printer_bed->Clear();
+    p->plate_bed_types.clear();
+    const auto& bed_labels = print_config_def.get("curr_bed_type")->enum_labels;
+    const auto bed_type = plate->get_bed_type(true);
+    for (size_t i = 0; i < bed_labels.size(); ++i) {
+        const auto type = BedType(i + 1);
+        const auto& label = bed_labels[i];
+        if (type != bed_type && model &&
+            std::find(model->not_support_bed_types.begin(), model->not_support_bed_types.end(), label) != model->not_support_bed_types.end())
+            continue;
+        p->plate_bed_types.push_back(type);
+        const int item = p->combo_printer_bed->Append(_L(label));
+        if (type == bed_type)
+            p->combo_printer_bed->SetSelection(item);
+    }
+    if (p->combo_printer_bed->GetSelection() == wxNOT_FOUND && !p->plate_bed_types.empty())
+        p->combo_printer_bed->SetSelection(0);
+    p->combo_printer_bed->Enable(true);
+    refresh_printer_controls(bundle, &config, profile->is_bambu);
+
+    const auto* saved_names = profile->config.option<ConfigOptionStrings>("filament_settings_id");
+    const auto* types = profile->config.option<ConfigOptionStrings>("filament_type");
+    const auto* colors = profile->config.option<ConfigOptionStrings>("filament_colour");
+    // Filament types may be repeated for several nozzle variants of the same slot.
+    const size_t count = colors && !colors->values.empty() ? colors->values.size() :
+                         saved_names && !saved_names->values.empty() ? saved_names->values.size() :
+                         types ? types->values.size() : 0;
+    if (p->plate_filament_combos.size() != count) {
+        for (size_t column : {size_t(0), size_t(1)})
+            p->sizer_plate_filaments->GetItem(column)->GetSizer()->Clear(false);
+        for (auto* combo : p->plate_filament_combos) {
+            combo->Hide();
+            combo->edit_btn->Hide();
+            combo->clr_picker->Hide();
+            // The combo owns the two sibling buttons.
+            combo->Destroy();
+        }
+        p->plate_filament_combos.assign(count, nullptr);
+        for (size_t slot = 0; slot < count; ++slot)
+            init_filament_combo(&p->plate_filament_combos[slot], int(slot), true);
+    }
+    const auto filament_names = plate_preset_names(bundle.filaments, printer_context, &process_context);
+    const auto* mixed = config.option<ConfigOptionBools>("filament_is_mixed");
+    const auto* color_packs = config.option<ConfigOptionStrings>("filament_multi_colour");
+    const auto* color_modes = config.option<ConfigOptionStrings>("filament_colour_type");
+    for (size_t slot = 0; slot < count; ++slot) {
+        auto* combo = p->plate_filament_combos[slot];
+        const bool has_saved_slot = saved_names && slot < saved_names->values.size();
+        const bool named = has_saved_slot && !saved_names->values[slot].empty();
+        const std::string name = named ? saved_names->values[slot] :
+                                 types && slot < types->values.size() ? types->values[slot] : std::string{};
+        const bool can_select = has_saved_slot && (!mixed || slot >= mixed->values.size() || !mixed->values[slot]);
+        combo->set_plate_choices(can_select ? filament_names : std::vector<std::string>{}, name,
+                                 change_preset(Preset::TYPE_FILAMENT, slot));
+        combo->edit_btn->Enable(can_select && named);
+        combo->edit_btn->SetBitmap_("edit");
+        combo->clr_picker->Enable(false);
+        combo->set_sync_badge(false);
+        const int icon_size = 2 * wxGetApp().em_unit();
+        const auto number = std::to_string(slot + 1);
+        if (color_packs && slot < color_packs->values.size() && !color_packs->values[slot].empty()) {
+            const bool gradient = color_modes && slot < color_modes->values.size() && color_modes->values[slot] == "0";
+            combo->clr_picker->SetBitmap(*get_extruder_color_icon(
+                Slic3r::split_string(color_packs->values[slot], ' '), gradient, number, icon_size, icon_size));
+        } else {
+            const std::string color = colors && slot < colors->values.size() ? colors->values[slot] : "#636363";
+            combo->clr_picker->SetBitmap(*get_extruder_color_icon(color, number, icon_size, icon_size));
+        }
+    }
+    if (print_tab && print_tab->get_combo_box()) {
+        const auto names = plate_preset_names(bundle.prints, printer_context);
+        print_tab->get_combo_box()->set_plate_choices(names, process_name,
+                                                      change_preset(Preset::TYPE_PRINT));
+        print_tab->set_plate_process_config(&config, profile->is_bambu);
+    }
+    show_SEMM_buttons();
+    p->m_panel_filament_content->Layout();
+    update_filaments_area_height();
+    p->scrolled->Layout();
+}
+
+void Sidebar::refresh_printer_controls(PresetBundle& bundle, const DynamicPrintConfig* plate_config, bool is_bambu)
+{
+    auto& printer_preset = bundle.printers.get_edited_preset();
+    const auto& printer_config = plate_config ? *plate_config : printer_preset.config;
+    const auto& project_config = plate_config ? *plate_config : bundle.project_config;
+    const bool isBBL = plate_config ? is_bambu : bundle.is_bbl_vendor();
+    auto* nozzle_diameter = dynamic_cast<const ConfigOptionFloats*>(printer_config.option("nozzle_diameter"));
+    auto extruder_variants = printer_config.option<ConfigOptionStrings>("extruder_variant_list");
+    if (!nozzle_diameter || !extruder_variants)
+        return;
+    const auto* model = printer_config.option<ConfigOptionString>("printer_model");
+    const auto printer_model = model ? model->value : std::string{};
+    const auto printer_type = plate_config ? plate_printer_model_id(printer_config, bundle)
+                                           : printer_preset.get_printer_type(&bundle);
+
+    const bool is_dual_extruder = extruder_variants->size() == 2;
+    // why: agent mode drives the native device tab, so the sidebar lays out like BBL
+    // (no physical-printer connect button).
+    p->layout_printer((plate_config ? is_bambu : bundle.use_bbl_network()) || wxGetApp().app_config->get_bool("use_printer_agents"),
+                      isBBL && is_dual_extruder, plate_config, is_bambu);
+
+    // Update nozzle titles from printer config (e.g. "Main Nozzle" / "Auxiliary Nozzle" for N6)
+    // UI left = DEPUTY_EXTRUDER_ID(1), UI right = MAIN_EXTRUDER_ID(0)
+    if (is_dual_extruder) {
+        auto left_title  = DevPrinterConfigUtil::get_toolhead_display_name(printer_type, DEPUTY_EXTRUDER_ID, ToolHeadComponent::Nozzle, ToolHeadNameCase::TitleCase);
+        auto right_title = DevPrinterConfigUtil::get_toolhead_display_name(printer_type, MAIN_EXTRUDER_ID, ToolHeadComponent::Nozzle, ToolHeadNameCase::TitleCase);
+        p->left_extruder->SetTitle(_L(left_title));
+        p->right_extruder->SetTitle(_L(right_title));
+    }
+
+    auto extruders_def = printer_config.def()->get("extruder_type");
+    auto extruders = printer_config.option<ConfigOptionEnumsGeneric>("extruder_type");
+    auto nozzle_volumes_def = project_config.def()->get("nozzle_volume_type");
+    auto nozzle_volumes = project_config.option<ConfigOptionEnumsGeneric>("nozzle_volume_type");
+    auto diameters = plate_config ? std::vector<std::string>{} : bundle.printers.diameters_of_selected_printer();
+    const auto* variant_option = printer_config.option<ConfigOptionString>("printer_variant");
+    const auto diameter = variant_option ? variant_option->value : std::string{};
+    if (plate_config && std::find(diameters.begin(), diameters.end(), diameter) == diameters.end() && !diameter.empty())
+        diameters.push_back(diameter);
+    auto extruder_max_nozzle_count = printer_config.option<ConfigOptionIntsNullable>("extruder_max_nozzle_count");
+    auto update_extruder_variant = [printer_model, extruders_def, extruders, nozzle_volumes_def, nozzle_volumes, extruder_variants,diameter,extruder_max_nozzle_count](ExtruderGroup & extruder, size_t row, int index) {
+        ComboBox *combo_flow = extruder.rows[row].flow;
+        combo_flow->Clear();
+        // A profile may leave the per-extruder lists shorter than the nozzle count (they are
+        // padded when the printer is loaded, but a hand-written preset need not be).
+        if (!extruders_def || !extruders || !nozzle_volumes_def || !nozzle_volumes ||
+            index >= int(extruder_variants->values.size()) || index >= int(extruders->values.size()) ||
+            index >= int(nozzle_volumes->values.size()) ||
+            size_t(extruders->values[index]) >= extruders_def->enum_labels.size()) {
+            combo_flow->Hide();
+            return;
+        }
+        auto type = extruders_def->enum_labels[extruders->values[index]];
+        int select = -1;
+        for (size_t i = 0; i < nozzle_volumes_def->enum_labels.size(); ++i) {
+            // get_at falls back to the first entry when a profile defines no per-extruder value,
+            // so extruders without an explicit sub-nozzle count never offer Hybrid. A nullable-int
+            // nil is INT_MAX (> 1) and would otherwise falsely pass the gate, so exclude it too.
+            if (boost::algorithm::contains(extruder_variants->values[index], type + " " + nozzle_volumes_def->enum_labels[i]) ||
+                (extruder_max_nozzle_count && !extruder_max_nozzle_count->values.empty() &&
+            extruder_max_nozzle_count->get_at(index) > 1 && extruder_max_nozzle_count->get_at(index) != ConfigOptionIntsNullable::nil_value() &&
+                nozzle_volumes_def->enum_keys_map->at(nozzle_volumes_def->enum_values[i]) == nvtHybrid)) {
+                auto cur_volume_type = nozzle_volumes_def->enum_keys_map->at(nozzle_volumes_def->enum_values[i]);
+                // Defensive: profiles restrict E3D to 0.4 / 0.6; keep it out elsewhere.
+                if (cur_volume_type == NozzleVolumeType::nvtE3DHighFlow && diameter != "0.4" && diameter != "0.6")
+                    continue;
+                if (cur_volume_type == NozzleVolumeType::nvtHighFlow && (diameter == "0.2" ||
+                    is_skip_high_flow_printer(printer_model)))
+                    continue;
+                // The client data is the enum value, not the label position: E3D High Flow is 5
+                // but sits at position 4, and a position would write an invalid type.
+                if (nozzle_volumes->values[index] == cur_volume_type)
+                    select = combo_flow->GetCount();
+                combo_flow->Append(_L(nozzle_volumes_def->enum_labels[i]), {}, (void*)(intptr_t)cur_volume_type);
+            }
+        }
+        if (select == -1)
+            select = combo_flow->GetCount() - 1;
+        combo_flow->SetSelection(select);
+        // No flow variant for this extruder: the diameter keeps the whole row.
+        combo_flow->Show(combo_flow->GetCount() > 0);
+    };
+
+    auto update_extruder_diameter = [&diameters, &nozzle_diameter, &diameter](int extruder_index,ExtruderGroup & extruder) {
+        extruder.combo_diameter->Clear();
+        if (extruder_index >= int(nozzle_diameter->values.size()))
+            return;
+        int select = -1;
+        // ORCA get the actual nozzle diameter from printer config
+        auto nozzle_dia = get_diameter_string(nozzle_diameter->values[extruder_index]);
+        // Named variants such as "0.4HS" and "0.4 High Flow" share a physical diameter.
+        // Retain the variant selection unless the diameter was customized.
+        const bool keep_variant = diameter.substr(0, diameter.find_first_not_of("0123456789.")) == nozzle_dia &&
+                                  std::find(diameters.begin(), diameters.end(), diameter) != diameters.end();
+        const std::string &selected_variant = keep_variant ? diameter : nozzle_dia;
+        // ORCA try to add nozzle diameter from config if list is empty. fixes blank nozzle combo box when preset has no alias
+        if(!diameters.empty() && diameters[0].empty() && !nozzle_dia.empty()){
+            diameters[0] = nozzle_dia;
+        }
+        // Orca: Check if the actual nozzle diameter exists in the list, if not add it as a custom option
+        if (std::find(diameters.begin(), diameters.end(), nozzle_dia) == diameters.end() && !nozzle_dia.empty()) {
+            diameters.push_back(nozzle_dia);
+        }
+        for (size_t i = 0; i < diameters.size(); ++i) {
+            if (diameters[i] == selected_variant)
+                select = extruder.combo_diameter->GetCount();
+            extruder.combo_diameter->Append(diameters[i], {});
+        }
+        extruder.combo_diameter->SetSelection(select);
+        extruder.diameter = nozzle_dia;
+    };
+    const bool multi_extruder_rows = p->single_extruder->NozzleRowCount() > 1;
+    if (is_dual_extruder && !multi_extruder_rows) {
+        p->left_extruder->SetTitle(_L(DevPrinterConfigUtil::get_toolhead_display_name(printer_type, DEPUTY_EXTRUDER_ID, ToolHeadComponent::Nozzle, ToolHeadNameCase::TitleCase)));
+        p->right_extruder->SetTitle(_L(DevPrinterConfigUtil::get_toolhead_display_name(printer_type, MAIN_EXTRUDER_ID, ToolHeadComponent::Nozzle, ToolHeadNameCase::TitleCase)));
+        if (!plate_config) {
+            AMSCountPopupWindow::UpdateAMSCount(0, p->left_extruder);
+            AMSCountPopupWindow::UpdateAMSCount(1, p->right_extruder);
+        }
+        update_extruder_variant(*p->left_extruder, 0, 0);
+        update_extruder_variant(*p->right_extruder, 0, 1);
+        //if (!p->is_switching_diameter) {
+            update_extruder_diameter(0, *p->left_extruder);
+            update_extruder_diameter(1, *p->right_extruder);
+        //}
+    } else {
+        if (!plate_config)
+            AMSCountPopupWindow::UpdateAMSCount(0, p->single_extruder);
+        for (size_t row = 0; row < p->single_extruder->NozzleRowCount(); ++row)
+            update_extruder_variant(*p->single_extruder, row, int(row));
+        //if (!p->is_switching_diameter)
+            update_extruder_diameter(0, *p->single_extruder);
+        // The card reads the nozzles out, the variant box above is what switches the machine.
+        p->single_extruder->SetRowDiameters(nozzle_diameter->values);
+        if (multi_extruder_rows) {
+            // The hidden left/right cards keep mirroring the first extruders' diameters: the
+            // device sync path (a connected Bambu printer or a printer agent) still reads them.
+            update_extruder_diameter(0, *p->left_extruder);
+            update_extruder_diameter(1, *p->right_extruder);
+        }
+
+        // ORCA sync unified nozzle combo box
+        p->combo_nozzle_dia->Clear();
+        for (size_t i = 0; i < diameters.size(); ++i)
+            p->combo_nozzle_dia->Append(diameters[i], {});
+        // Prefer the variant the preset names: a mixed-nozzle machine reads "0.4+0.6", which is
+        // no single extruder's diameter.
+        const int variant = p->combo_nozzle_dia->FindString(diameter);
+        p->combo_nozzle_dia->SetSelection(variant != wxNOT_FOUND ? variant : (*p->single_extruder).combo_diameter->GetSelection());
+
+        // ORCA update nozzle type
+        const auto& full_config = plate_config ? *plate_config : bundle.full_config();
+        wxString nozzle_type = "-";
+        const ConfigOptionEnumsGenericNullable* cfg_nozzle_type = full_config.option<ConfigOptionEnumsGenericNullable>("nozzle_type");
+        if (cfg_nozzle_type && !cfg_nozzle_type->values.empty()){
+            std::vector<NozzleType> nozzle_types(cfg_nozzle_type->size());
+            for (size_t idx = 0; idx < cfg_nozzle_type->size(); ++idx)
+                nozzle_types[idx] = NozzleType(cfg_nozzle_type->values[idx]);
+            // NEEDFIX this part can be replaced with shorter names
+            nozzle_type = nozzle_types[0] == ntHardenedSteel   ? _L("Hardened Steel") :
+                          nozzle_types[0] == ntStainlessSteel  ? _L("Stainless Steel") :
+                          nozzle_types[0] == ntTungstenCarbide ? _L("Tungsten Carbide") :
+                          nozzle_types[0] == ntBrass           ? _L("Brass")
+                                                               : wxString("-"); // Undefined
+        }
+        p->label_nozzle_type->SetLabel(nozzle_type);
+        p->label_nozzle_type->SetToolTip(nozzle_type == "-" ? "" : nozzle_type);
+    }
+    // The stock device-sync handlers write to the project printer.
+    // Show the saved tool configuration while a plate profile is active.
+    p->combo_nozzle_dia->Enable(!plate_config);
+    for (auto* group : {p->left_extruder, p->right_extruder, p->single_extruder}) {
+        group->Enable(!plate_config);
+        if (plate_config)
+            group->SetCount(0);
+    }
+    auto image_path = get_cur_select_bed_image();
+    if (!image_path.empty())
+        p->image_printer_bed->SetBitmap(create_scaled_bitmap(image_path, this, PRINTER_THUMBNAIL_SIZE.GetHeight()));
 }
 
 void Sidebar::update_presets(Preset::Type preset_type)
@@ -4011,163 +4498,8 @@ void Sidebar::update_presets(Preset::Type preset_type)
         else
             wxGetApp().plater()->get_current_canvas3D()->get_arrange_settings().align_to_y_axis = false;
 
-        // Update dual extrudes
-        auto* nozzle_diameter = dynamic_cast<const ConfigOptionFloats*>(printer_preset.config.option("nozzle_diameter"));
-        auto extruder_variants = printer_preset.config.option<ConfigOptionStrings>("extruder_variant_list");
-        std::string printer_model = printer_preset.config.option<ConfigOptionString>("printer_model")->value;
-
-        bool isBBL = preset_bundle.is_bbl_vendor();
-        bool is_dual_extruder = extruder_variants->size() == 2;
-        // why: agent mode drives the native device tab, so the sidebar lays out like BBL
-        // (no physical-printer connect button).
-        p->layout_printer(preset_bundle.use_bbl_network() || wxGetApp().app_config->get_bool("use_printer_agents"),
-                          isBBL && is_dual_extruder);
-
-        // Update nozzle titles from printer config (e.g. "Main Nozzle" / "Auxiliary Nozzle" for N6)
-        // UI left = DEPUTY_EXTRUDER_ID(1), UI right = MAIN_EXTRUDER_ID(0)
-        if (is_dual_extruder) {
-            std::string printer_type = printer_preset.get_printer_type(wxGetApp().preset_bundle);
-            auto left_title  = DevPrinterConfigUtil::get_toolhead_display_name(printer_type, DEPUTY_EXTRUDER_ID, ToolHeadComponent::Nozzle, ToolHeadNameCase::TitleCase);
-            auto right_title = DevPrinterConfigUtil::get_toolhead_display_name(printer_type, MAIN_EXTRUDER_ID, ToolHeadComponent::Nozzle, ToolHeadNameCase::TitleCase);
-            p->left_extruder->SetTitle(_L(left_title));
-            p->right_extruder->SetTitle(_L(right_title));
-        }
-
-        auto extruders_def = printer_preset.config.def()->get("extruder_type");
-        auto extruders = printer_preset.config.option<ConfigOptionEnumsGeneric>("extruder_type");
-        auto nozzle_volumes_def = wxGetApp().preset_bundle->project_config.def()->get("nozzle_volume_type");
-        auto nozzle_volumes = wxGetApp().preset_bundle->project_config.option<ConfigOptionEnumsGeneric>("nozzle_volume_type");
-        auto diameters = wxGetApp().preset_bundle->printers.diameters_of_selected_printer();
-        auto diameter = printer_preset.config.opt_string("printer_variant");
-        auto extruder_max_nozzle_count = printer_preset.config.option<ConfigOptionIntsNullable>("extruder_max_nozzle_count");
-        const bool has_flow_variant = preset_bundle.support_different_extruders();
-        auto update_extruder_variant = [printer_model, extruders_def, extruders, nozzle_volumes_def, nozzle_volumes, extruder_variants,diameter,extruder_max_nozzle_count,has_flow_variant](ExtruderGroup & extruder, size_t row, int index) {
-            ComboBox *combo_flow = extruder.rows[row].flow;
-            combo_flow->Clear();
-            // A profile may leave the per-extruder lists shorter than the nozzle count (they are
-            // padded when the printer is loaded, but a hand-written preset need not be).
-            if (index >= int(extruder_variants->values.size()) || index >= int(extruders->values.size()) ||
-                index >= int(nozzle_volumes->values.size())) {
-                combo_flow->Hide();
-                return;
-            }
-            auto type = extruders_def->enum_labels[extruders->values[index]];
-            int select = -1;
-            for (size_t i = 0; i < nozzle_volumes_def->enum_labels.size(); ++i) {
-                // get_at falls back to the first entry when a profile defines no per-extruder value,
-                // so extruders without an explicit sub-nozzle count never offer Hybrid. A nullable-int
-                // nil is INT_MAX (> 1) and would otherwise falsely pass the gate, so exclude it too.
-                if (boost::algorithm::contains(extruder_variants->values[index], type + " " + nozzle_volumes_def->enum_labels[i]) ||
-                    (extruder_max_nozzle_count->get_at(index) > 1 && extruder_max_nozzle_count->get_at(index) != ConfigOptionIntsNullable::nil_value() &&
-                    nozzle_volumes_def->enum_keys_map->at(nozzle_volumes_def->enum_values[i]) == nvtHybrid)) {
-                    auto cur_volume_type = nozzle_volumes_def->enum_keys_map->at(nozzle_volumes_def->enum_values[i]);
-                    // Defensive: profiles restrict E3D to 0.4 / 0.6; keep it out elsewhere.
-                    if (cur_volume_type == NozzleVolumeType::nvtE3DHighFlow && diameter != "0.4" && diameter != "0.6")
-                        continue;
-                    if (cur_volume_type == NozzleVolumeType::nvtHighFlow && (diameter == "0.2" ||
-                        is_skip_high_flow_printer(printer_model)))
-                        continue;
-                    // The client data is the enum value, not the label position: E3D High Flow is 5
-                    // but sits at position 4, and a position would write an invalid type.
-                    if (nozzle_volumes->values[index] == cur_volume_type)
-                        select = combo_flow->GetCount();
-                    combo_flow->Append(_L(nozzle_volumes_def->enum_labels[i]), {}, (void*)(intptr_t)cur_volume_type);
-                }
-            }
-            if (select == -1)
-                select = combo_flow->GetCount() - 1;
-            combo_flow->SetSelection(select);
-            // No flow variant for this printer or extruder: the diameter keeps the whole row.
-            combo_flow->Show(has_flow_variant && combo_flow->GetCount() > 0);
-        };
-
-        auto update_extruder_diameter = [&diameters, &nozzle_diameter, &diameter](int extruder_index,ExtruderGroup & extruder) {
-            extruder.combo_diameter->Clear();
-            if (extruder_index >= int(nozzle_diameter->values.size()))
-                return;
-            int select = -1;
-            // ORCA get the actual nozzle diameter from printer config
-            auto nozzle_dia = get_diameter_string(nozzle_diameter->values[extruder_index]);
-            // Named variants such as "0.4HS" and "0.4 High Flow" share a physical diameter.
-            // Retain the variant selection unless the diameter was customized.
-            const bool keep_variant = diameter.substr(0, diameter.find_first_not_of("0123456789.")) == nozzle_dia &&
-                                      std::find(diameters.begin(), diameters.end(), diameter) != diameters.end();
-            const std::string &selected_variant = keep_variant ? diameter : nozzle_dia;
-            // ORCA try to add nozzle diameter from config if list is empty. fixes blank nozzle combo box when preset has no alias
-            if(!diameters.empty() && diameters[0].empty() && !nozzle_dia.empty()){
-                diameters[0] = nozzle_dia;
-            }
-            // Orca: Check if the actual nozzle diameter exists in the list, if not add it as a custom option
-            if (std::find(diameters.begin(), diameters.end(), nozzle_dia) == diameters.end() && !nozzle_dia.empty()) {
-                diameters.push_back(nozzle_dia);
-            }
-            for (size_t i = 0; i < diameters.size(); ++i) {
-                if (diameters[i] == selected_variant)
-                    select = extruder.combo_diameter->GetCount();
-                extruder.combo_diameter->Append(diameters[i], {});
-            }
-            extruder.combo_diameter->SetSelection(select);
-            extruder.diameter = nozzle_dia;
-        };
-        auto image_path = get_cur_select_bed_image();
-        const bool multi_extruder_rows = p->single_extruder->NozzleRowCount() > 1;
-        if (is_dual_extruder && !multi_extruder_rows) {
-            std::string printer_type = printer_preset.get_printer_type(wxGetApp().preset_bundle);
-            p->left_extruder->SetTitle(_L(DevPrinterConfigUtil::get_toolhead_display_name(printer_type, DEPUTY_EXTRUDER_ID, ToolHeadComponent::Nozzle, ToolHeadNameCase::TitleCase)));
-            p->right_extruder->SetTitle(_L(DevPrinterConfigUtil::get_toolhead_display_name(printer_type, MAIN_EXTRUDER_ID, ToolHeadComponent::Nozzle, ToolHeadNameCase::TitleCase)));
-            AMSCountPopupWindow::UpdateAMSCount(0, p->left_extruder);
-            AMSCountPopupWindow::UpdateAMSCount(1, p->right_extruder);
-            update_extruder_variant(*p->left_extruder, 0, 0);
-            update_extruder_variant(*p->right_extruder, 0, 1);
-            //if (!p->is_switching_diameter) {
-                update_extruder_diameter(0, *p->left_extruder);
-                update_extruder_diameter(1, *p->right_extruder);
-            //}
-            p->image_printer_bed->SetBitmap(create_scaled_bitmap(image_path, this, PRINTER_THUMBNAIL_SIZE.GetHeight()));
-        } else {
-            AMSCountPopupWindow::UpdateAMSCount(0, p->single_extruder);
-            for (size_t row = 0; row < p->single_extruder->NozzleRowCount(); ++row)
-                update_extruder_variant(*p->single_extruder, row, int(row));
-            //if (!p->is_switching_diameter)
-                update_extruder_diameter(0, *p->single_extruder);
-            // The card reads the nozzles out, the variant box above is what switches the machine.
-            p->single_extruder->SetRowDiameters(nozzle_diameter->values);
-            if (multi_extruder_rows) {
-                // The hidden left/right cards keep mirroring the first extruders' diameters: the
-                // device sync path (a connected Bambu printer or a printer agent) still reads them.
-                update_extruder_diameter(0, *p->left_extruder);
-                update_extruder_diameter(1, *p->right_extruder);
-            }
-
-            // ORCA sync unified nozzle combo box
-            p->combo_nozzle_dia->Clear();
-            for (size_t i = 0; i < diameters.size(); ++i)
-                p->combo_nozzle_dia->Append(diameters[i], {});
-            // Prefer the variant the preset names: a mixed-nozzle machine reads "0.4+0.6", which is
-            // no single extruder's diameter.
-            const int variant = p->combo_nozzle_dia->FindString(diameter);
-            p->combo_nozzle_dia->SetSelection(variant != wxNOT_FOUND ? variant : (*p->single_extruder).combo_diameter->GetSelection());
-            
-            // ORCA update nozzle type
-            const auto& full_config = wxGetApp().preset_bundle->full_config();
-            wxString nozzle_type = "-";
-            const ConfigOptionEnumsGenericNullable* cfg_nozzle_type = full_config.option<ConfigOptionEnumsGenericNullable>("nozzle_type");
-            if(cfg_nozzle_type != nullptr){
-                std::vector<NozzleType> nozzle_types(cfg_nozzle_type->size());
-                for (size_t idx = 0; idx < cfg_nozzle_type->size(); ++idx)
-                    nozzle_types[idx] = NozzleType(cfg_nozzle_type->values[idx]);
-                // NEEDFIX this part can be replaced with shorter names
-                nozzle_type = nozzle_types[0] == ntHardenedSteel   ? _L("Hardened Steel") :
-                              nozzle_types[0] == ntStainlessSteel  ? _L("Stainless Steel") :
-                              nozzle_types[0] == ntTungstenCarbide ? _L("Tungsten Carbide") :
-                              nozzle_types[0] == ntBrass           ? _L("Brass")
-                                                                   : wxString("-"); // Undefined
-            }
-            p->label_nozzle_type->SetLabel(nozzle_type);
-            p->label_nozzle_type->SetToolTip(nozzle_type == "-" ? "" : nozzle_type);
-
-            p->image_printer_bed->SetBitmap(create_scaled_bitmap(image_path, this, PRINTER_THUMBNAIL_SIZE.GetHeight()));
-        }
+        if (!p->displayed_plate)
+            refresh_printer_controls(preset_bundle);
 
         if (GUI::wxGetApp().plater())
             GUI::wxGetApp().plater()->update_machine_sync_status();
@@ -4179,6 +4511,10 @@ void Sidebar::update_presets(Preset::Type preset_type)
 
     default: break;
     }
+
+    if (p->displayed_plate && (preset_type == Preset::TYPE_PRINT ||
+        preset_type == Preset::TYPE_FILAMENT || preset_type == Preset::TYPE_PRINTER))
+        refresh_plate_presets(true);
 
     // Synchronize config.ini with the current selections.
     wxGetApp().preset_bundle->export_selections(*wxGetApp().app_config);
@@ -4217,32 +4553,33 @@ void Sidebar::update_presets_from_to(Slic3r::Preset::Type preset_type, std::stri
     BOOST_LOG_TRIVIAL(debug) << __FUNCTION__ << boost::format(": exit!");
 }
 
-BedType Sidebar::get_cur_select_bed_type() {
-    int selection = p->combo_printer_bed->GetSelection();
-    if (selection < 0 && selection >= m_cur_combox_bed_types.size()) {
-        p->combo_printer_bed->SetSelection(0);
-        selection = 0;
-    }
-    auto select_bed_type = m_cur_combox_bed_types[selection];
-    return select_bed_type;
+BedType Sidebar::get_cur_select_bed_type()
+{
+    const auto& types = p->displayed_plate ? p->plate_bed_types : m_cur_combox_bed_types;
+    const int selected = p->combo_printer_bed->GetSelection();
+    return selected >= 0 && size_t(selected) < types.size() ? types[selected] : btDefault;
 }
 
 std::string Sidebar::get_cur_select_bed_image()
 {
-    auto select_bed_type   = get_cur_select_bed_type();
-    //auto series_suffix_str = m_cur_image_bed_type.empty() ? "" : ("_" + m_cur_image_bed_type);
-    auto image_path        = bed_type_thumbnails[select_bed_type];// + series_suffix_str;
-    return image_path;
+    const auto image = bed_type_thumbnails.find(get_cur_select_bed_type());
+    return image != bed_type_thumbnails.end() ? image->second : bed_type_thumbnails.at(btPEI);
 }
 
 void Sidebar::set_bed_type_accord_combox(BedType bed_type) {
+    if (p->displayed_plate)
+        return;
+    p->refreshing_project_bed = true;
     for (size_t i = 0; i < m_cur_combox_bed_types.size(); i++) {
         if (m_cur_combox_bed_types[i] == bed_type) {
             p->combo_printer_bed->SelectAndNotify(i);
+            p->refreshing_project_bed = false;
             return;
         }
     }
-    p->combo_printer_bed->SelectAndNotify(0);
+    if (!m_cur_combox_bed_types.empty())
+        p->combo_printer_bed->SelectAndNotify(0);
+    p->refreshing_project_bed = false;
 }
 
 bool Sidebar::reset_bed_type_combox_choices(bool is_sidebar_init)
@@ -4343,6 +4680,8 @@ static std::string blend_mixed_color(const std::vector<unsigned int> &comp_ids,
 
 void Sidebar::update_mixed_filament_list()
 {
+    if (p->displayed_plate)
+        return;
     auto* plater = dynamic_cast<Plater*>(GetParent());
     if (!plater) return;
 
@@ -5470,8 +5809,12 @@ void Sidebar::update_filaments_area_height()
 // ORCA
 {
     // ORCA use a height with user preference
-    auto left_sizer          = p->sizer_filaments->GetItem((size_t) 0)->GetSizer();
-    auto combo_sizer         = left_sizer->GetItem((size_t) 0)->GetSizer();
+    auto* columns            = p->displayed_plate ? p->sizer_plate_filaments : p->sizer_filaments;
+    auto left_sizer          = columns->GetItem((size_t) 0)->GetSizer();
+    const auto* first_row    = left_sizer->GetItem(size_t(0));
+    if (!first_row)
+        return;
+    auto combo_sizer         = first_row->GetSizer();
     int  preferred_rows      = std::ceil(0.5 * std::stoi(wxGetApp().app_config->get("filaments_area_preferred_count")));
     auto height_with_borders = combo_sizer->GetSize().GetHeight(); // gets height from sizer instead static numbers
     p->m_panel_filament_content->SetMaxSize(wxSize{-1, preferred_rows * height_with_borders});
@@ -5488,7 +5831,7 @@ void Sidebar::update_filaments_area_height()
 void Sidebar::update_filaments_counter(bool force_layout)
 // ORCA
 {
-    int  current_count       = p->combos_filament.size();
+    int  current_count       = p->displayed_plate ? p->plate_filament_combos.size() : p->combos_filament.size();
     int  preferred_count     = std::stoi(wxGetApp().app_config->get("filaments_area_preferred_count"));
     bool isShown             = p->m_panel_filament_content->IsShown();
     auto counter             = p->m_staticText_filament_count;
@@ -5842,6 +6185,10 @@ void Sidebar::on_filaments_delete(size_t filament_id)
 }
 
 void Sidebar::add_filament() {
+    if (p->displayed_plate) {
+        p->plater->change_plate_filament_count(1);
+        return;
+    }
     if (p->combos_filament.size() >= MAXIMUM_EXTRUDER_NUMBER) return;
     wxColour    new_col        = Plater::get_next_color_for_filament();
     add_custom_filament(new_col);
@@ -5855,6 +6202,10 @@ void Sidebar::add_filament() {
 }
 
 void Sidebar::delete_filament(size_t filament_id, int replace_filament_id) {
+    if (p->displayed_plate) {
+        p->plater->change_plate_filament_count(-1);
+        return;
+    }
     if (is_new_project_in_gcode3mf()) { return; }
     if (p->combos_filament.size() <= 1) return;
 
@@ -6065,8 +6416,7 @@ bool Sidebar::is_new_project_in_gcode3mf()
 void Sidebar::on_bed_type_change(BedType bed_type)
 {
     // Orca: Map BedType to the current combo list (some printers filter types).
-
-    if (p->combo_printer_bed == nullptr)
+    if (p->displayed_plate || p->combo_printer_bed == nullptr)
         return;
 
     for (size_t i = 0; i < m_cur_combox_bed_types.size(); ++i) {
@@ -6203,6 +6553,8 @@ void Sidebar::reset_fila_switch()
 bool Sidebar::need_auto_sync_extruder_list_after_connect_priner(const MachineObject *obj)
 {
     if(!obj)
+        return false;
+    if (const auto* plate = selected_print_plate(p->plater); plate && plate->printer_profile().assigned())
         return false;
 
     std::string   machine_print_name = obj->get_show_printer_type();
@@ -6604,8 +6956,14 @@ void Sidebar::show_SEMM_buttons()
     if (!p || p->combos_filament.empty() || !p->m_bpButton_add_filament || !p->m_bpButton_del_filament || !p->m_flushing_volume_btn)
         return;
     
-    bool is_multi_material = p->combos_filament.size() > 1;
-    bool single_or_bbl     = should_show_SEMM_buttons();
+    const auto& choices = p->displayed_plate ? p->plate_filament_combos : p->combos_filament;
+    const bool is_multi_material = choices.size() > 1;
+    const auto* semm = p->displayed_plate
+        ? p->displayed_plate_profile.option<ConfigOptionBool>("single_extruder_multi_material")
+        : nullptr;
+    const bool single_or_bbl = p->displayed_plate
+        ? p->displayed_plate_is_bambu || (semm && semm->value)
+        : should_show_SEMM_buttons();
     bool is_single = single_or_bbl && !is_multi_material; // SINGLE EXTRUDER / BBL WITH 1 MATERIAL
     bool is_multi  = single_or_bbl && is_multi_material;  // MULTI MATERIAL WITH SINGLE EXTRUDER
     bool is_fixed  = !is_single && !is_multi;             // MULTI EXTRUDER / TOOLCHANGER / IDEX WITH FIXED MATERIAL
@@ -6615,11 +6973,11 @@ void Sidebar::show_SEMM_buttons()
     p->m_flushing_volume_btn->Show(  is_multi);
 
     if (is_multi) {
-        for (auto &c : p->combos_filament)
+        for (auto* c : choices)
             c->edit_btn->SetBitmap_("menu_filament");
     }
     else if (is_single || is_fixed) {
-        for (auto &c : p->combos_filament)
+        for (auto* c : choices)
             c->edit_btn->SetBitmap_("edit");
     }
 
@@ -6962,36 +7320,37 @@ static std::map<std::string, std::string> printer_thumbnails = {};
 void Sidebar::update_printer_thumbnail()
 {
     auto& preset_bundle = wxGetApp().preset_bundle;
-    Preset & selected_preset = preset_bundle->printers.get_edited_preset();
-    std::string printer_type    = selected_preset.get_current_printer_type(preset_bundle);
-    if (printer_thumbnails.find(printer_type) != printer_thumbnails.end()) // Use known cache first
-        p->image_printer->SetBitmap(create_scaled_bitmap(printer_thumbnails[printer_type], this, PRINTER_THUMBNAIL_SIZE.GetHeight()));
+    const auto& printer_config = p->displayed_plate ? p->displayed_plate_profile
+        : preset_bundle->printers.get_edited_preset().config;
+    const auto* model = printer_config.option<ConfigOptionString>("printer_model");
+    const auto model_name = model ? model->value : std::string{};
+    if (printer_thumbnails.find(model_name) != printer_thumbnails.end()) // Use known cache first
+        p->image_printer->SetBitmap(create_scaled_bitmap(printer_thumbnails[model_name], this, PRINTER_THUMBNAIL_SIZE.GetHeight()));
     else {
         /* ORCA this part check images folder for BBL covers but not checks file existence and causes crash on Linux
         *       BBL covers already exist on profile folder so no need to use this section
         try {
             // No cache, try dedicated printer preview
-            p->image_printer->SetBitmap(create_scaled_bitmap("printer_preview_" + printer_type, this, 48));
+            p->image_printer->SetBitmap(create_scaled_bitmap("printer_preview_" + model_name, this, 48));
             // Success, cache it
-            printer_thumbnails[printer_type] = "printer_preview_" + printer_type;
+            printer_thumbnails[model_name] = "printer_preview_" + model_name;
             return;
         } catch (...) {}
         */
 
         // Orca: try to use the printer model cover as the thumbnail
-        const auto model_name = selected_preset.config.opt_string("printer_model");
         std::string cover_file = model_name + "_cover.png";
         for (auto vendor_profile : preset_bundle->vendors) {
             for (auto vendor_model : vendor_profile.second.models) {
                 if (vendor_model.name == model_name) {
                     // Try to find the printer cover
                     boost::filesystem::path cover_path = boost::filesystem::absolute(boost::filesystem::path(resources_dir()) /
-                                                                                     "/profiles/" / vendor_profile.second.id / cover_file)
+                                                                                     "profiles" / vendor_profile.second.id / cover_file)
                                                              .make_preferred();
                     if (boost::filesystem::exists(cover_path)) {
                         try {
                             p->image_printer->SetBitmap(create_scaled_bitmap(cover_path.string(), this, PRINTER_THUMBNAIL_SIZE.GetHeight()));
-                            printer_thumbnails[printer_type] = cover_path.string(); // Cache the path so we don't look up again
+                            printer_thumbnails[model_name] = cover_path.string(); // Cache the path so we don't look up again
                             return;
                         } catch (...) {}
                     }
@@ -6999,7 +7358,7 @@ void Sidebar::update_printer_thumbnail()
             }
         }
         p->image_printer->SetBitmap(create_scaled_bitmap("printer_placeholder", this, PRINTER_THUMBNAIL_SIZE.GetHeight()));
-        printer_thumbnails[printer_type] = "printer_placeholder"; // Avoid unnecessary try
+        printer_thumbnails[model_name] = "printer_placeholder"; // Avoid unnecessary try
     }
 }
 
@@ -7252,6 +7611,7 @@ struct Plater::priv
         bool                  show{false};
     } sidebar_layout;
     Bed3D bed;
+    bool showing_plate_printer_bed = false;
     Camera camera;
     //BBS: partplate related structure
     PartPlateList partplate_list;
@@ -7951,7 +8311,7 @@ Plater::priv::priv(Plater *q, MainFrame *main_frame)
     this->q->Bind(EVT_NOTICE_CHILDE_SIZE_CHANGED, &Sidebar::on_size, sidebar);
     this->q->Bind(EVT_NOTICE_FULL_SCREEN_CHANGED, &Sidebar::on_full_screen, sidebar);
     this->q->Bind(EVT_ADD_CUSTOM_FILAMENT, &priv::on_add_custom_filament, this);
-    main_frame->m_tabpanel->Bind(wxEVT_NOTEBOOK_PAGE_CHANGING, &priv::on_tab_selection_changing, this);
+    main_frame->m_tabpanel->Bind(wxEVT_BOOKCTRL_PAGE_CHANGING, &priv::on_tab_selection_changing, this);
 
     auto* panel_3d = new wxPanel(q);
     view3D = new View3D(panel_3d, bed, &model, config, &background_process);
@@ -8421,7 +8781,7 @@ Plater::priv::~priv()
         delete config;
     // Saves the database of visited (already shown) hints into hints.ini.
     notification_manager->deactivate_loaded_hints();
-    main_frame->m_tabpanel->Unbind(wxEVT_NOTEBOOK_PAGE_CHANGING, &priv::on_tab_selection_changing, this);
+    main_frame->m_tabpanel->Unbind(wxEVT_BOOKCTRL_PAGE_CHANGING, &priv::on_tab_selection_changing, this);
 }
 
 void Plater::priv::update(unsigned int flags)
@@ -8460,6 +8820,7 @@ void Plater::priv::update(unsigned int flags)
 #endif
 
     update_sidebar();
+    sidebar->refresh_plate_presets();
 }
 
 void Plater::priv::select_view(const std::string& direction)
@@ -9290,6 +9651,8 @@ std::vector<size_t> Plater::priv::load_files(const std::vector<fs::path>& input_
         Slic3r::Model model;
         StagedGeometryFile legacy_read;
         StagedGeometryFile& parsed_file = stage_geometry ? *staged_files[i] : legacy_read;
+        // Restore saved bed positions until this file's model instances have been added.
+        ScopeGuard finish_plate_layout([this]() { partplate_list.finish_loading_printer_profile_layout(); });
         // BBS: add auxiliary files related logic
         bool load_aux = strategy & LoadStrategy::LoadAuxiliary, load_old_project = false;
         if (load_model && load_config && type_3mf) {
@@ -10939,6 +11302,27 @@ int Plater::priv::get_selected_volume_idx() const
 
 void Plater::priv::selection_changed()
 {
+    if (partplate_list.has_printer_profiles() && !q->is_loading_project()) {
+        const Selection& selection = q->get_selection();
+        int owner = -1;
+        bool one_plate = true;
+        for (unsigned index : selection.get_volume_idxs()) {
+            const GLVolume* volume = selection.get_volume(index);
+            const int candidate = partplate_list.find_instance_belongs(volume->object_idx(), volume->instance_idx());
+            if (candidate < 0 || (owner >= 0 && owner != candidate)) {
+                one_plate = false;
+                break;
+            }
+            owner = candidate;
+        }
+        const bool changed_plate = one_plate && owner >= 0 && owner != partplate_list.get_curr_plate_index();
+        if (changed_plate)
+            q->select_plate(owner, false);
+        sidebar->refresh_plate_presets();
+        if (changed_plate)
+            wxGetApp().params_panel()->notify_object_config_changed();
+    }
+
     // if the selection is not valid to allow for layer editing, we need to turn off the tool if it is running
     if (!layers_height_allowed() && view3D->is_layers_editing_enabled()) {
         SimpleEvent evt(EVT_GLTOOLBAR_LAYERSEDITING);
@@ -11527,6 +11911,10 @@ void Plater::priv::update_print_volume_state()
 {
     //BBS: use the plate's bounding box instead of the bed's
     PartPlate* pp = partplate_list.get_curr_plate();
+    if (partplate_list.has_printer_profiles()) {
+        pp->update_model_print_volume_state();
+        return;
+    }
     BuildVolume build_volume(pp->get_shape(), this->bed.build_volume().printable_height(), this->bed.build_volume().extruder_areas(), this->bed.build_volume().extruder_heights());
     this->model.update_print_volume_state(build_volume);
 }
@@ -11701,8 +12089,10 @@ unsigned int Plater::priv::update_background_process(bool force_validation, bool
     // applied to the Print below, so the prism change rides this same apply.
     if (printer_technology == ptFFF && this->ensure_belt_purge_tower())
         return_state |= UPDATE_BACKGROUND_PROCESS_REFRESH_SCENE;
-    // Update the "out of print bed" state of ModelInstances.
-    update_print_volume_state();
+    // An unswitched background process still belongs to its own plate.
+    const bool mixed = partplate_list.has_printer_profiles();
+    if (!mixed)
+        update_print_volume_state();
     // Apply new config to the possibly running background task.
     bool               was_running = background_process.running();
     //BBS: add the switch print logic before Print::Apply
@@ -11720,22 +12110,25 @@ unsigned int Plater::priv::update_background_process(bool force_validation, bool
     for (ModelObject *model_object : this->model.objects)
         model_object->sync_painted_modifiers();
 
-    Print::ApplyStatus invalidated;
-    const auto& preset_bundle = wxGetApp().preset_bundle;
-    if (preset_bundle->get_printer_extruder_count() > 1) {
-        PartPlate* cur_plate = background_process.get_current_plate();
-        std::vector<int> f_maps = cur_plate->get_real_filament_maps(preset_bundle->project_config);
-        std::vector<int> f_volume_maps = cur_plate->get_filament_volume_maps();
-        if (f_volume_maps.empty()) {
-            f_volume_maps = preset_bundle->get_default_nozzle_volume_types_for_filaments(f_maps);
-        }
-        // Set the device filament info before Print::apply: it compares the payload and invalidates the
-        // grouping steps when the AMS material inventory changed, so apply must see it in the same pass.
-        background_process.fff_print()->set_extruder_filament_info(get_extruder_filament_info());
-        invalidated = background_process.apply(this->model, preset_bundle->full_config(false, f_maps, f_volume_maps));
+    PartPlate* cur_plate = background_process.get_current_plate();
+    if (mixed)
+        cur_plate->update_model_print_volume_state();
+    if (const auto error = cur_plate->printer_profile_slice_error(); !error.empty()) {
+        background_process.stop();
+        cur_plate->update_slice_result_valid_state(false);
+        cur_plate->update_apply_result_invalid(true);
+        notification_manager->push_validate_error_notification(StringObjectException{error});
+        main_frame->update_slice_print_status(MainFrame::eEventSliceUpdate, false);
+        process_completed_with_error = cur_plate->get_index();
+        return return_state | UPDATE_BACKGROUND_PROCESS_INVALID;
     }
-    else
-        invalidated = background_process.apply(this->model, preset_bundle->full_config(false));
+
+    const auto& preset_bundle = wxGetApp().preset_bundle;
+    // Print::apply compares the live AMS inventory and invalidates filament grouping in this pass.
+    // Assigned plates use their own profile, so only the sidebar's printer receives its live data.
+    if (!cur_plate->printer_profile().assigned() && preset_bundle->get_printer_extruder_count() > 1)
+        background_process.fff_print()->set_extruder_filament_info(get_extruder_filament_info());
+    Print::ApplyStatus invalidated = background_process.apply(this->model, *preset_bundle);
 
     if ((invalidated == Print::APPLY_STATUS_CHANGED) || (invalidated == Print::APPLY_STATUS_INVALIDATED))
         // BBS: add only gcode mode
@@ -13177,6 +13570,8 @@ void Plater::priv::on_select_bed_type(wxCommandEvent &evt)
 {
     ComboBox* combo = static_cast<ComboBox*>(evt.GetEventObject());
     auto        select_bed_type = sidebar->get_cur_select_bed_type();
+    if (select_bed_type <= btDefault || select_bed_type >= btCount)
+        return;
     std::string bed_type_name = print_config_def.get("curr_bed_type")->enum_values[(int)select_bed_type - 1];
 
     PresetBundle& preset_bundle = *wxGetApp().preset_bundle;
@@ -14141,6 +14536,19 @@ void Plater::priv::on_action_print_plate(SimpleEvent&)
     }
 
     PresetBundle& preset_bundle = *wxGetApp().preset_bundle;
+    const auto* plate = partplate_list.get_selected_plate();
+    if (plate && plate->printer_profile().assigned()) {
+        const std::string agent_id = plate_printer_agent_id(plate, preset_bundle);
+        if (agent_id.empty()) {
+            show_error(q, _L("Install the matching printer preset for this plate to use its connection."));
+            return;
+        }
+        if (agent_id == ORCA_PRINTER_AGENT_ID)
+            q->send_gcode_legacy(PLATE_CURRENT_IDX, nullptr);
+        else
+            open_machine_select_dialog(partplate_list.get_curr_plate_index());
+        return;
+    }
     if (preset_bundle.use_bbl_network() || wxGetApp().app_config->get_bool("use_printer_agents")) {
         open_machine_select_dialog(partplate_list.get_curr_plate_index());
     } else {
@@ -14150,6 +14558,26 @@ void Plater::priv::on_action_print_plate(SimpleEvent&)
 
 void Plater::priv::open_machine_select_dialog(int plate_idx, PrintFromType print_type)
 {
+    if (print_type == PrintFromType::FROM_NORMAL) {
+        auto& app = wxGetApp();
+        app.switch_printer_agent();
+        if (partplate_list.has_printer_profiles()) {
+            PartPlate* plate = partplate_list.get_selected_plate();
+            if (plate == nullptr || partplate_list.get_curr_plate_index() != plate_idx)
+                return;
+            const std::string agent_id = plate_printer_agent_id(plate, *app.preset_bundle);
+            const auto live_agent = app.getAgent() ? app.getAgent()->get_printer_agent() : nullptr;
+            if (!live_agent || live_agent->get_agent_info().id != agent_id) {
+                show_error(q, wxString::Format(_L("Printer agent %s is unavailable for this plate."), from_u8(agent_id)));
+                return;
+            }
+            if (agent_id == BBL_PRINTER_AGENT_ID && plate->printer_profile().assigned() &&
+                plate_printer_model_id(plate->printer_profile().config, *app.preset_bundle).empty()) {
+                show_error(q, _L("The Bambu printer model for this plate is unavailable. Install its printer preset."));
+                return;
+            }
+        }
+    }
     // BBS
     if (!m_select_machine_dlg)
         m_select_machine_dlg = new SelectMachineDialog(q);
@@ -14160,6 +14588,10 @@ void Plater::priv::open_machine_select_dialog(int plate_idx, PrintFromType print
 
 void Plater::priv::on_action_send_to_multi_machine(SimpleEvent&)
 {
+    if (partplate_list.has_printer_profiles()) {
+        show_error(q, _L("This project uses plate printer profiles. Export the selected plate as a G-code file."));
+        return;
+    }
     if (!m_send_multi_dlg)
         m_send_multi_dlg = new SendMultiMachinePage(q);
     m_send_multi_dlg->prepare(partplate_list.get_curr_plate_index());
@@ -14222,35 +14654,18 @@ void Plater::priv::on_tab_selection_changing(wxBookCtrlEvent& e)
     sidebar_layout.show = new_name == TAB_ID_PREPARE || new_name == TAB_ID_PREVIEW;
     update_sidebar();
     int old_sel = e.GetOldSelection();
-    const bool use_printer_agents = wxGetApp().app_config->get_bool("use_printer_agents");
-    const bool use_native_device_tab = wxGetApp().preset_bundle &&
-        (wxGetApp().preset_bundle->use_bbl_device_tab() || use_printer_agents);
-    if (use_native_device_tab && new_name == TAB_ID_MONITOR) {
-        // BBL network module is only required for BBL-vendor printers.
-        // Non-BBL Python plugins (e.g. moonraker) drive the Device tab without it.
-        if (!use_printer_agents && wxGetApp().preset_bundle->is_bbl_vendor() && !Slic3r::NetworkAgent::is_network_module_loaded()) {
+    if (main_frame->m_tabpanel->GetPage(new_sel) == main_frame->m_monitor_page && wxGetApp().preset_bundle) {
+        const auto* plate = partplate_list.get_selected_plate();
+        auto& bundle = *wxGetApp().preset_bundle;
+        const bool is_bambu = plate && plate->printer_profile().assigned() ?
+            plate_printer_agent_id(plate, bundle) == BBL_PRINTER_AGENT_ID :
+            bundle.is_bbl_vendor() && !wxGetApp().app_config->get_bool("use_printer_agents");
+        if (is_bambu && !Slic3r::NetworkAgent::is_network_module_loaded()) {
             e.Veto();
             BOOST_LOG_TRIVIAL(info) << boost::format("skipped tab switch from %1% to %2%, lack of network plugins") % old_sel % new_sel;
             if (q) {
                 wxCommandEvent* evt = new wxCommandEvent(EVT_INSTALL_PLUGIN_HINT);
                 wxQueueEvent(q, evt);
-            }
-        }
-    } else {
-        // Pointer test, not a name lookup: in printer-agents mode this page is TAB_ID_MONITOR_WEB
-        // while the native Device tab holds TAB_ID_MONITOR, and in legacy-web mode it holds
-        // TAB_ID_MONITOR itself.
-        const bool selecting_web_device_tab = main_frame->m_printer_view_page &&
-            main_frame->m_tabpanel->GetPage(new_sel) == main_frame->m_printer_view_page;
-        if (selecting_web_device_tab) {
-            // Use the selected discovered machine when the preset has no host.
-            main_frame->load_printer_url();
-        } else if (new_name == TAB_ID_MONITOR && wxGetApp().preset_bundle != nullptr) {
-            auto     cfg = wxGetApp().preset_bundle->printers.get_edited_preset().config;
-            wxString url = from_u8(PrintHost::get_print_host_webui(&cfg));
-            if (PrinterWebView* view = PrinterWebView::if_built(); view != nullptr && url.empty()) {
-                // It's missing_connection page, reload so that we can replay the gif image
-                view->reload();
             }
         }
     }
@@ -14264,6 +14679,10 @@ int Plater::priv::update_print_required_data(Slic3r::DynamicPrintConfig config, 
 
 void Plater::priv::on_action_send_to_printer(bool isall)
 {
+    if (partplate_list.has_printer_profiles()) {
+        show_error(q, _L("This project uses plate printer profiles. Export the selected plate as a G-code file."));
+        return;
+    }
 	if (!m_send_to_sdcard_dlg) m_send_to_sdcard_dlg = new SendToPrinterDialog(q);
     if (isall) {
         m_send_to_sdcard_dlg->prepare(PLATE_ALL_IDX);
@@ -14287,6 +14706,10 @@ void Plater::priv::on_action_select_sliced_plate(wxCommandEvent &evt)
 
 void Plater::priv::on_action_print_all(SimpleEvent&)
 {
+    if (partplate_list.has_printer_profiles()) {
+        show_error(q, _L("This project uses plate printer profiles. Export the selected plate as a G-code file."));
+        return;
+    }
     if (q != nullptr) {
         BOOST_LOG_TRIVIAL(debug) << __FUNCTION__ << ":received print all event\n" ;
     }
@@ -14307,8 +14730,12 @@ void Plater::priv::on_action_export_gcode(SimpleEvent&)
     }
 }
 
-void Plater::priv::on_action_send_gcode(SimpleEvent&)
+void Plater::priv::on_action_send_gcode(SimpleEvent& event)
 {
+    if (partplate_list.has_printer_profiles()) {
+        on_action_print_plate(event);
+        return;
+    }
     if (q != nullptr) {
         BOOST_LOG_TRIVIAL(debug) << __FUNCTION__ << ":received export gcode event\n" ;
         q->send_gcode_legacy();
@@ -14352,6 +14779,7 @@ void Plater::priv::on_plate_selected(SimpleEvent&)
 {
     BOOST_LOG_TRIVIAL(debug) << __FUNCTION__ << ":received plate selected event\n" ;
     sidebar->obj_list()->on_plate_selected(partplate_list.get_curr_plate_index());
+    sidebar->refresh_plate_presets();
 }
 
 void Plater::priv::on_action_request_model_id(wxCommandEvent& evt)
@@ -15367,7 +15795,9 @@ void Plater::priv::set_bed_shape(const Pointfs       &shape,
         partplate_list.set_shapes(shape, exclude_areas, wrapping_exclude_areas, extruder_areas, extruder_heights, custom_texture, height_to_lid, height_to_rod);
 
         Vec2d new_shape_position = partplate_list.get_current_shape_position();
-        if (shape_position != new_shape_position)
+        if (partplate_list.has_printer_profiles() || showing_plate_printer_bed)
+            q->set_bed_position(new_shape_position);
+        else if (shape_position != new_shape_position)
             bed.set_shape(shape, printable_height, extruder_areas, extruder_heights, custom_model, force_as_custom, new_shape_position);
     }
 }
@@ -16514,7 +16944,10 @@ void Plater::load_project(wxString const& filename2,
     }
 
     m_loading_project = true;
-    ScopeGuard loading_project_sc([this]() { m_loading_project = false; }); // Make sure state restored on any early return
+    ScopeGuard loading_project_sc([this]() {
+        m_loading_project = false;
+        CallAfter([this] { p->sidebar->refresh_plate_presets(); });
+    });
 
     auto path     = into_path(filename);
 
@@ -20023,6 +20456,10 @@ void Plater::send_to_printer(bool isall)
 //BBS export gcode 3mf to file
 void Plater::export_gcode_3mf(bool export_all)
 {
+    if (p->partplate_list.has_printer_profiles()) {
+        show_error(this, _L("This project uses plate printer profiles. Export the selected plate as a G-code file."));
+        return;
+    }
     if (p->model.objects.empty())
         return;
 
@@ -20897,12 +21334,39 @@ int Plater::export_3mf(const boost::filesystem::path& output_path, SaveStrategy 
 
     if (!path.Lower().EndsWith(".3mf"))
         return -1;
+    PartPlate* print_plate = nullptr;
+    if (p->partplate_list.has_printer_profiles() && !(strategy & SaveStrategy::Backup) &&
+        ((strategy & SaveStrategy::WithGcode) || (strategy & SaveStrategy::WithSliceInfo) || (strategy & SaveStrategy::MinimalPublished))) {
+        if (export_plate_idx == PLATE_CURRENT_IDX)
+            export_plate_idx = p->partplate_list.get_curr_plate_index();
+        if ((strategy & SaveStrategy::MinimalPublished) || !(strategy & SaveStrategy::SkipModel) ||
+            export_plate_idx != p->partplate_list.get_curr_plate_index()) {
+            show_error(this, _L("Use Print plate to send one plate with its printer profile."));
+            return -1;
+        }
+        print_plate = p->partplate_list.get_curr_plate();
+        if (!print_plate->is_slice_result_ready_for_print() || !print_plate->is_valid_gcode_file()) {
+            show_error(this, _L("Slice this plate before printing."));
+            return -1;
+        }
+    }
 
     // take care about private data stored into .3mf
     // modify model
     publish(p->model, strategy);
 
-    DynamicPrintConfig cfg = wxGetApp().preset_bundle->full_config_secure();
+    PresetBundle& preset_bundle = *wxGetApp().preset_bundle;
+    const bool assigned = print_plate && print_plate->printer_profile().assigned();
+    const bool bambu_output = assigned ? print_plate->printer_profile().is_bambu : preset_bundle.is_bbl_vendor();
+    DynamicPrintConfig cfg;
+    if (assigned) {
+        PlatePrinterProfile profile;
+        profile.config = print_plate->build_print_config(preset_bundle);
+        profile.remove_local_settings();
+        cfg = std::move(profile.config);
+    } else {
+        cfg = preset_bundle.full_config_secure();
+    }
     const std::string path_u8 = into_u8(path);
     wxBusyCursor wait;
 
@@ -21009,7 +21473,7 @@ int Plater::export_3mf(const boost::filesystem::path& output_path, SaveStrategy 
 
     // Backups (SkipStatic) don't pack G-code, so don't run user scripts for them.
     if ((strategy & SaveStrategy::WithGcode) && !(strategy & SaveStrategy::SkipStatic) &&
-        p->printer_technology == ptFFF && !wxGetApp().preset_bundle->is_bbl_vendor()) {
+        p->printer_technology == ptFFF && !bambu_output) {
         try {
             for (PlateData* pd : plate_data_list) {
                 if (pd == nullptr || pd->gcode_file.empty())
@@ -21038,8 +21502,9 @@ int Plater::export_3mf(const boost::filesystem::path& output_path, SaveStrategy 
     }
 
     // BBS: backup
-    PresetBundle& preset_bundle = *wxGetApp().preset_bundle;
-    std::vector<Preset*> project_presets = preset_bundle.get_current_project_embedded_presets();
+    std::vector<Preset*> project_presets;
+    if (!assigned)
+        project_presets = preset_bundle.get_current_project_embedded_presets();
 
     StoreParams store_params;
     store_params.path  = path_u8;
@@ -21067,21 +21532,24 @@ int Plater::export_3mf(const boost::filesystem::path& output_path, SaveStrategy 
     if (nozzle_diameter_option)
         nozzle_diameter_str = nozzle_diameter_option->serialize();
 
-    std::string printer_model_id = preset_bundle.printers.get_edited_preset().get_printer_type(&preset_bundle);
+    std::string printer_model_id = assigned ? plate_printer_model_id(cfg, preset_bundle) :
+        preset_bundle.printers.get_edited_preset().get_printer_type(&preset_bundle);
     // The printer reads slice_info.config and knows only its own catalog ids.
-    auto* id_agent = preset_bundle.is_bbl_vendor() ? wxGetApp().getAgent() : nullptr;
+    auto* id_agent = bambu_output ? wxGetApp().getAgent() : nullptr;
 
     for (int i = 0; i < plate_data_list.size(); i++) {
         PlateData *plate_data = plate_data_list[i];
+        if (print_plate && plate_data->plate_index != export_plate_idx)
+            continue;
         plate_data->printer_model_id = printer_model_id;
         plate_data->nozzle_diameters = nozzle_diameter_str;
         for (auto it = plate_data->slice_filaments_info.begin(); it != plate_data->slice_filaments_info.end(); it++) {
             std::string display_filament_type;
             it->type  = cfg.get_filament_type(display_filament_type, it->id);
-            it->filament_id = filament_id_opt ? filament_id_opt->get_at(it->id) : "";
+            it->filament_id = filament_id_opt && !filament_id_opt->values.empty() ? filament_id_opt->get_at(it->id) : "";
             if (id_agent)
                 it->filament_id = id_agent->from_orca_filament_id(it->filament_id);
-            it->color = filament_color ? filament_color->get_at(it->id) : "#FFFFFF";
+            it->color = filament_color && !filament_color->values.empty() ? filament_color->get_at(it->id) : "#FFFFFF";
             // save filament info used in curr plate
             int index = p->partplate_list.get_curr_plate_index();
             if (store_params.id_bboxes.size() > index) {
@@ -21430,12 +21898,25 @@ void Plater::reslice_SLA_until_step(SLAPrintObjectStep step, const ModelObject &
 }
 void Plater::send_gcode_legacy(int plate_idx, Export3mfProgressFn proFn)
 {
-    // if physical_printer is selected, send gcode for this printer
-    // DynamicPrintConfig* physical_printer_config = wxGetApp().preset_bundle->physical_printers.get_selected_printer_config();
-    DynamicPrintConfig* physical_printer_config = &Slic3r::GUI::wxGetApp().preset_bundle->printers.get_edited_preset().config;
-    if (! physical_printer_config || p->model.objects.empty())
+    const bool mixed = p->partplate_list.has_printer_profiles();
+    const int current_plate_idx = p->partplate_list.get_curr_plate_index();
+    const int resolved_plate_idx = plate_idx == PLATE_CURRENT_IDX ? current_plate_idx : plate_idx;
+    if (mixed && resolved_plate_idx != current_plate_idx) {
+        show_error(this, _L("Use Print plate to send one plate with its printer profile."));
+        return;
+    }
+    PartPlate* plate = p->partplate_list.get_selected_plate();
+    const ObjectID plate_id = plate ? plate->id() : ObjectID{};
+    const auto* local_config = plate_print_host_config(plate, *wxGetApp().preset_bundle);
+    if (mixed && (local_config == nullptr || local_config->opt_string("print_host").empty())) {
+        show_error(this, _L("Configure a print host or choose a printer agent in this plate's printer preset."));
+        return;
+    }
+    if (local_config == nullptr || p->model.objects.empty())
         return;
 
+    auto connection_config = *local_config;
+    auto* physical_printer_config = &connection_config;
     PrintHostJob upload_job(physical_printer_config);
     if (upload_job.empty())
         return;
@@ -21445,8 +21926,6 @@ void Plater::send_gcode_legacy(int plate_idx, Export3mfProgressFn proFn)
     const bool  use_3mf     = use_3mf_opt != nullptr && use_3mf_opt->value;
 
     upload_job.upload_data.use_3mf = use_3mf;
-    // Orca: the concrete plate to export/send (PLATE_CURRENT_IDX resolves to the current plate).
-    const int resolved_plate_idx = plate_idx == PLATE_CURRENT_IDX ? get_partplate_list().get_curr_plate_index() : plate_idx;
 
     // Obtain default output path
     fs::path default_output_file;
@@ -21533,7 +22012,8 @@ void Plater::send_gcode_legacy(int plate_idx, Export3mfProgressFn proFn)
 
             std::vector<FilamentInfo> project_filaments;
             PlateDataPtrs               plate_data_list;
-            DynamicPrintConfig          cfg                 = wxGetApp().preset_bundle->full_config();
+            DynamicPrintConfig          cfg                 = plate && plate->printer_profile().assigned() ?
+                plate->build_print_config(*wxGetApp().preset_bundle) : wxGetApp().preset_bundle->full_config();
             const auto*                 filament_color      = dynamic_cast<const ConfigOptionStrings*>(cfg.option("filament_colour"));
             const auto*                 filament_id_opt     = dynamic_cast<const ConfigOptionStrings*>(cfg.option("filament_ids"));
             auto enrich_project_filaments = [&](std::vector<FilamentInfo>& filaments) {
@@ -21620,6 +22100,12 @@ void Plater::send_gcode_legacy(int plate_idx, Export3mfProgressFn proFn)
             return;
     }
 
+    if (mixed) {
+        const auto* current = p->partplate_list.get_selected_plate();
+        if (current == nullptr || current->id() != plate_id || p->partplate_list.get_curr_plate_index() != resolved_plate_idx)
+            return;
+    }
+
     if (use_3mf) {
         // Process gcode
         const int result = send_gcode(resolved_plate_idx, nullptr);
@@ -21642,6 +22128,7 @@ int Plater::send_gcode(int plate_idx, Export3mfProgressFn proFn)
     set_print_job_plate_idx(plate_idx);
 
     PartPlate* plate = get_partplate_list().get_curr_plate();
+    p->m_print_job_data._3mf_config_path.clear();
     try {
         p->m_print_job_data._3mf_path = fs::path(plate->get_tmp_gcode_path());
         p->m_print_job_data._3mf_path.replace_extension("3mf");
@@ -21655,7 +22142,7 @@ int Plater::send_gcode(int plate_idx, Export3mfProgressFn proFn)
 #if !BBL_RELEASE_TO_PUBLIC
     //only save model in QA environment
     std::string sel = get_app_config()->get("iot_environment");
-    if (sel == ENV_PRE_HOST)
+    if (sel == ENV_PRE_HOST && !p->partplate_list.has_printer_profiles())
         strategy = SaveStrategy::Silence | SaveStrategy::SplitModel | SaveStrategy::WithGcode;
 #endif
 
@@ -23091,16 +23578,7 @@ void Plater::apply_background_progress()
     const auto& preset_bundle = wxGetApp().preset_bundle;
     //always apply the current plate's print
     Print::ApplyStatus invalidated;
-    if (preset_bundle->get_printer_extruder_count() > 1) {
-        std::vector<int> f_maps = part_plate->get_real_filament_maps(preset_bundle->project_config);
-        std::vector<int> f_volume_maps = part_plate->get_filament_volume_maps();
-        if (f_volume_maps.empty()) {
-            f_volume_maps = preset_bundle->get_default_nozzle_volume_types_for_filaments(f_maps);
-        }
-        invalidated = p->background_process.apply(this->model(), preset_bundle->full_config(false, f_maps, f_volume_maps));
-    }
-    else
-        invalidated = p->background_process.apply(this->model(), preset_bundle->full_config(false));
+    invalidated = p->background_process.apply(this->model(), *preset_bundle);
 
     BOOST_LOG_TRIVIAL(info) << __FUNCTION__ << boost::format(" %1%: plate %2%, after apply, invalidated= %3%, previous result_valid %4% ") % __LINE__ % plate_index % invalidated % result_valid;
     if (invalidated & PrintBase::APPLY_STATUS_INVALIDATED)
@@ -23140,16 +23618,7 @@ int Plater::select_plate(int plate_index, bool need_slice)
         part_plate->get_print(&print, &gcode_result, NULL);
 
         //always apply the current plate's print
-        if (preset_bundle->get_printer_extruder_count() > 1) {
-            std::vector<int> f_maps = part_plate->get_real_filament_maps(preset_bundle->project_config);
-            std::vector<int> f_volume_maps = part_plate->get_filament_volume_maps();
-            if (f_volume_maps.empty()) {
-                f_volume_maps = preset_bundle->get_default_nozzle_volume_types_for_filaments(f_maps);
-            }
-            invalidated = p->background_process.apply(this->model(), preset_bundle->full_config(false, f_maps, f_volume_maps));
-        }
-        else
-            invalidated = p->background_process.apply(this->model(), preset_bundle->full_config(false));
+        invalidated = p->background_process.apply(this->model(), *preset_bundle);
         bool model_fits, validate_err;
 
         BOOST_LOG_TRIVIAL(info) << __FUNCTION__ << boost::format(" %1%: plate %2%, after apply, invalidated= %3%, previous result_valid %4% ")%__LINE__ %plate_index  %invalidated %result_valid;
@@ -23301,16 +23770,21 @@ extern std::string& get_right_extruder_unprintable_text();
 void Plater::validate_current_plate(bool& model_fits, bool& validate_error)
 {
     ObjectFilamentResults object_results;
-    ModelInstanceEPrintVolumeState state = p->view3D->get_canvas3d()->check_volumes_outside_state(&object_results);
-    model_fits = (state != ModelInstancePVS_Partly_Outside);
+    PartPlate* cur_plate = p->partplate_list.get_curr_plate();
+    const bool mixed = p->partplate_list.has_printer_profiles();
+    if (mixed)
+        cur_plate->update_model_print_volume_state();
+    const std::string profile_error = cur_plate->printer_profile_slice_error();
+    const ModelInstanceEPrintVolumeState state = mixed ? ModelInstancePVS_Inside :
+        p->view3D->get_canvas3d()->check_volumes_outside_state(&object_results);
+    model_fits = profile_error.empty() && state != ModelInstancePVS_Partly_Outside;
 
-    PartPlate *cur_plate = wxGetApp().plater()->get_partplate_list().get_curr_plate();
-    if (model_fits) {  // TPU check
+    if (model_fits && !cur_plate->printer_profile().assigned()) {  // TPU check
         bool  tpu_valid = cur_plate->check_tpu_printable_status(wxGetApp().preset_bundle->full_config(), wxGetApp().preset_bundle->get_used_tpu_filaments(cur_plate->get_extruders(true)));
         model_fits &= tpu_valid;
     }
 
-    if (model_fits) { // Filament printable check
+    if (model_fits && !cur_plate->printer_profile().assigned()) { // Filament printable check
         wxString filament_printable_error_msg;
         bool filament_printable = cur_plate->check_filament_printable(wxGetApp().preset_bundle->full_config(), filament_printable_error_msg);
         model_fits &= filament_printable;
@@ -23325,7 +23799,8 @@ void Plater::validate_current_plate(bool& model_fits, bool& validate_error)
         Polygons polygons;
         std::vector<std::pair<Polygon, float>> height_polygons;
         p->background_process.fff_print()->set_check_multi_filaments_compatibility(wxGetApp().app_config->get("enable_high_low_temp_mixed_printing") == "false");
-        StringObjectException err = p->background_process.validate(&warnings, &polygons, &height_polygons);
+        StringObjectException err = profile_error.empty() ? p->background_process.validate(&warnings, &polygons, &height_polygons) :
+                                                           StringObjectException{profile_error};
         // update string by type
         post_process_string_object_exception(err);
         BOOST_LOG_TRIVIAL(info) << __FUNCTION__ << boost::format(": validate err=%1%, warnings=%2%, model_fits %3%")%err.string%warnings.size() %model_fits;
@@ -23430,7 +23905,14 @@ bool Plater::refresh_missing_plugin_block(bool* block_toggled)
     // The block is derived solely from PluginResolver; snapshot it before the refresh to detect a
     // toggle (so the caller can refresh the Slice button).
     const bool was_blocked = has_missing_plugins() || has_inactive_plugins() || has_broken_plugins();
-    refresh_missing_plugins(*wxGetApp().preset_bundle);
+    const auto& profile = p->partplate_list.get_curr_plate()->printer_profile();
+    if (profile.assigned()) {
+        refresh_missing_plugins(Preset::TYPE_PRINT, profile.config.option<ConfigOptionStrings>("plugins"));
+        refresh_missing_plugins(Preset::TYPE_PRINTER, nullptr);
+        refresh_missing_plugins(Preset::TYPE_FILAMENT, nullptr);
+    } else {
+        refresh_missing_plugins(*wxGetApp().preset_bundle);
+    }
 
     const auto missing_refs = [](const std::vector<MissingPlugin>& missing) {
         std::vector<std::string> refs;
@@ -23618,6 +24100,24 @@ void Plater::open_platesettings_dialog(wxCommandEvent& evt) {
     int plate_index = evt.GetInt();
     PlateSettingsDialog dlg(this, _L("Plate Settings"), evt.GetString() == "only_layer_sequence");
     PartPlate* curr_plate = p->partplate_list.get_curr_plate();
+    const auto& saved_profile = curr_plate->printer_profile();
+    PresetBundle& bundle = *wxGetApp().preset_bundle;
+    const auto current_name = bundle.printers.get_edited_preset().name;
+    std::vector<wxString> profile_choices{_L("Use project printer")};
+    const int original_choice = saved_profile.assigned() ? 1 : 0;
+    if (saved_profile.assigned())
+        profile_choices.push_back(wxString::Format(_L("Keep saved profile: %s"), from_u8(saved_profile.config.opt_string("printer_settings_id"))));
+    const int capture_choice = int(profile_choices.size());
+    profile_choices.push_back(wxString::Format(_L("Capture current settings: %s"), from_u8(current_name)));
+    const int installed_offset = int(profile_choices.size());
+    std::vector<std::string> installed_profiles;
+    for (const auto& preset : bundle.printers) {
+        if (preset.is_visible && !preset.is_default && preset.printer_technology() == ptFFF) {
+            installed_profiles.push_back(preset.name);
+            profile_choices.push_back(from_u8(preset.name));
+        }
+    }
+    dlg.sync_printer_profiles(profile_choices, original_choice);
     dlg.sync_bed_type(curr_plate->get_bed_type());
 
     auto curr_print_seq = curr_plate->get_print_seq();
@@ -23690,8 +24190,312 @@ void Plater::open_platesettings_dialog(wxCommandEvent& evt) {
         });
     dlg.set_plate_name(from_u8(curr_plate->get_plate_name()));
 
-    dlg.ShowModal();
-    rename_plate(p->partplate_list.get_curr_plate_index(), dlg.get_plate_name().ToUTF8().data());
+    if (dlg.ShowModal() != wxID_YES)
+        return;
+    rename_plate(curr_plate->get_index(), dlg.get_plate_name().ToUTF8().data());
+    const int choice = dlg.get_printer_profile_choice();
+    if (choice == wxNOT_FOUND || choice == original_choice)
+        return;
+    if (p->background_process.running() || p->background_process.is_export_scheduled() || !get_ui_job_worker().is_idle()) {
+        show_error(this, _L("Wait for the current operation to finish before changing this plate's printer."));
+        return;
+    }
+
+    PlatePrinterProfile profile;
+    if (choice == capture_choice) {
+        profile = {bundle.full_config(false), bundle.is_bbl_vendor()};
+    } else if (choice >= installed_offset) {
+        const std::string& name = installed_profiles.at(choice - installed_offset);
+        PresetBundle staged(bundle);
+        staged.printers.select_preset_by_name(name, true);
+        if (staged.printers.get_selected_preset_name() != name) {
+            show_error(this, _L("The selected printer profile is unavailable."));
+            return;
+        }
+        staged.update_compatible(PresetSelectCompatibleType::Always);
+        staged.update_multi_material_filament_presets();
+        const auto bed_type = staged.printers.get_edited_preset().get_default_bed_type(&staged);
+        staged.project_config.set_key_value("curr_bed_type", new ConfigOptionEnum<BedType>(bed_type));
+        profile = {staged.full_config(false), staged.is_bbl_vendor()};
+    }
+    if (profile.assigned()) {
+        profile.config.update_plugin_manifest();
+        profile.remove_local_settings();
+    }
+    if (choice != 0 && !profile.valid()) {
+        show_error(this, _L("The selected printer profile does not contain a complete FFF configuration."));
+        return;
+    }
+
+    take_snapshot(_u8L("Change plate printer profile"));
+    p->partplate_list.reload_all_objects();
+    curr_plate->set_printer_profile(std::move(profile));
+    p->partplate_list.refresh_printer_profile_layout();
+    set_plater_dirty(true);
+    mark_plate_toolbar_image_dirty();
+    update();
+}
+
+void Plater::set_plate_bed_type(BedType type)
+{
+    auto* plate = selected_print_plate(this);
+    if (!plate || (plate->get_bed_type() == btDefault && !plate->printer_profile().assigned()))
+        return;
+    if (p->background_process.running() || p->background_process.is_export_scheduled() || !get_ui_job_worker().is_idle()) {
+        show_error(this, _L("Wait for the current operation to finish before changing the bed type."));
+        return;
+    }
+    if (plate->get_bed_type(true) == type)
+        return;
+    take_snapshot(_u8L("Change plate bed type"));
+    plate->set_bed_type(type);
+    set_plater_dirty(true);
+    update();
+}
+
+void Plater::change_plate_filament_count(int change)
+{
+    auto* plate = selected_print_plate(this);
+    if (!plate || !plate->printer_profile().assigned())
+        return;
+    const auto& config = plate->printer_profile().config;
+    const auto* names = config.option<ConfigOptionStrings>("filament_settings_id");
+    if (!names || names->values.empty())
+        return;
+    const size_t previous_count = names->values.size();
+    const int count = int(previous_count) + change;
+    if (count < 1 || count > MAXIMUM_EXTRUDER_NUMBER)
+        return;
+    if (p->background_process.is_export_scheduled() || !get_ui_job_worker().is_idle())
+        return;
+    if (change < 0) {
+        const auto used = plate->get_extruders(true, config, config, false);
+        if (std::find(used.begin(), used.end(), int(previous_count)) != used.end()) {
+            show_error(this, _L("Assign objects using the last filament to another filament first."));
+            return;
+        }
+    }
+    PlatePrinterProfile profile = plate->printer_profile();
+    try {
+        PresetBundle staged(*wxGetApp().preset_bundle);
+        staged.load_config_model("Plate settings.3mf", profile.config);
+        if (staged.num_mixed_filaments() > 0) {
+            show_error(this, _L("This plate uses mixed filaments. Choose a profile with the required filament slots."));
+            return;
+        }
+        if (!staged.printers.get_edited_preset().config.opt_bool("single_extruder_multi_material") &&
+            count < staged.get_printer_extruder_count())
+            return;
+        const auto color = Plater::get_next_color_for_filament().GetAsString(wxC2S_HTML_SYNTAX).ToStdString();
+        staged.set_num_filaments(unsigned(count), color);
+        auto updated = staged.full_config(false);
+        updated.apply_only(profile.config, Preset::printer_options(), true);
+        updated.apply_only(profile.config, Preset::print_options(), true);
+        updated.opt_string("printer_settings_id", true) = profile.config.opt_string("printer_settings_id");
+        updated.opt_string("print_settings_id", true) = profile.config.opt_string("print_settings_id");
+        profile.config = std::move(updated);
+        profile.remove_local_settings();
+        if (!profile.valid())
+            return;
+    } catch (const std::exception& error) {
+        show_error(this, from_u8(error.what()));
+        return;
+    }
+    p->background_process.stop();
+    p->m_slice_all = false;
+    take_snapshot(_u8L("Change plate filament count"));
+    plate->set_printer_profile(std::move(profile), false);
+    for (const char* key : {"filament_map", "filament_volume_map", "filament_nozzle_map"})
+        plate->config()->erase(key);
+    set_plater_dirty(true);
+    update();
+}
+
+void Plater::set_plate_process_option(const std::string& key, const ConfigOption& value)
+{
+    auto* plate = selected_print_plate(this);
+    const auto& keys = Preset::print_options();
+    if (!plate || !plate->printer_profile().assigned() || key == "post_process" ||
+        std::find(keys.begin(), keys.end(), key) == keys.end())
+        return;
+
+    if (p->background_process.is_export_scheduled() || !get_ui_job_worker().is_idle()) {
+        p->sidebar->refresh_plate_presets();
+        return;
+    }
+    const DynamicPrintConfig current = plate->build_print_config(*wxGetApp().preset_bundle);
+    const ConfigOption* previous = current.option(key);
+    if (previous && previous->type() == value.type() && *previous == value)
+        return;
+    // The field's value belongs to the displayed configuration. Copy it before refreshing any controls.
+    std::unique_ptr<ConfigOption> changed(value.clone());
+    p->background_process.stop();
+    p->m_slice_all = false;
+    take_snapshot(_u8L("Change plate process setting"));
+    PlatePrinterProfile profile = plate->printer_profile();
+    profile.config.set_key_value(key, changed.release());
+    profile.config.update_plugin_manifest();
+    profile.remove_local_settings();
+    plate->config()->erase(key);
+    plate->set_printer_profile(std::move(profile), false);
+    set_plater_dirty(true);
+    update();
+}
+
+void Plater::update_plates_using_printer_preset(const std::string& previous_name, const std::string& saved_name)
+{
+    auto& bundle = *wxGetApp().preset_bundle;
+    const auto* preset = bundle.printers.find_preset(saved_name, false, true);
+    if (!preset || preset->name != saved_name || preset->is_external || preset->is_project_embedded ||
+        preset->printer_technology() != ptFFF)
+        return;
+
+    auto& plates = p->partplate_list;
+    const auto* selected = plates.get_selected_plate();
+    const bool rebind_row = previous_name != saved_name && selected && selected->printer_profile().assigned() &&
+        selected->printer_profile().config.opt_string("printer_settings_id") == previous_name;
+    std::vector<std::pair<PartPlate*, PlatePrinterProfile>> updates;
+    for (auto* plate : plates.get_plate_list()) {
+        const auto& current = plate->printer_profile();
+        if (!current.assigned())
+            continue;
+        const auto& name = current.config.opt_string("printer_settings_id");
+        if (name != saved_name && !(rebind_row && name == previous_name))
+            continue;
+
+        auto profile = current;
+        for (const auto& key : Preset::printer_options()) {
+            if (key == "flashforge_serial_number")
+                continue;
+            if (const auto* value = preset->config.option(key))
+                profile.config.set_key_value(key, value->clone());
+        }
+        profile.config.opt_string("printer_settings_id", true) = saved_name;
+        profile.config.update_plugin_manifest();
+        profile.remove_local_settings();
+        if (!profile.valid()) {
+            show_error(this, _L("The saved printer preset could not be applied to its plates."));
+            return;
+        }
+        if (profile.config != current.config)
+            updates.emplace_back(plate, std::move(profile));
+    }
+    if (updates.empty())
+        return;
+    if (p->background_process.is_export_scheduled() || !get_ui_job_worker().is_idle()) {
+        show_error(this, _L("Finish the current operation and save the printer preset again to update its plates."));
+        return;
+    }
+
+    p->background_process.stop();
+    p->m_slice_all = false;
+    take_snapshot(_u8L("Update printer preset across plates"));
+    plates.reload_all_objects();
+    for (auto& [plate, profile] : updates) {
+        plate->set_printer_profile(std::move(profile), false);
+        plate->invalidate_exclusion_volume_preview();
+    }
+    plates.refresh_printer_profile_layout(true);
+    set_plater_dirty(true);
+    mark_plate_toolbar_image_dirty();
+    update();
+    p->sidebar->refresh_plate_presets();
+}
+
+void Plater::set_plate_preset(Preset::Type type, const std::string& name, size_t slot)
+{
+    auto* plate = selected_print_plate(this);
+    if (!plate || !plate->printer_profile().assigned())
+        return;
+    if (p->background_process.running() || p->background_process.is_export_scheduled() || !get_ui_job_worker().is_idle()) {
+        show_error(this, _L("Wait for the current operation to finish before changing plate presets."));
+        return;
+    }
+
+    PlatePrinterProfile profile = plate->printer_profile();
+    const auto& bundle = *wxGetApp().preset_bundle;
+    const bool is_printer = type == Preset::TYPE_PRINTER;
+    const bool is_process = type == Preset::TYPE_PRINT;
+    const auto& installed = is_printer ? bundle.printers : is_process ? bundle.prints : bundle.filaments;
+    const auto* preset = installed.find_preset(name, false);
+    if (!preset || preset->name != name || (is_printer && preset->printer_technology() != ptFFF))
+        return;
+
+    try {
+        PresetBundle staged(bundle);
+        staged.load_config_model("Plate settings.3mf", profile.config);
+        if (is_printer) {
+            staged.printers.select_preset_by_name(name, true);
+            if (staged.printers.get_selected_preset_name() != name)
+                return;
+            staged.update_compatible(PresetSelectCompatibleType::Always);
+            staged.update_multi_material_filament_presets();
+            const auto bed_type = staged.printers.get_edited_preset().get_default_bed_type(&staged);
+            staged.project_config.set_key_value("curr_bed_type", new ConfigOptionEnum<BedType>(bed_type));
+            profile = {staged.full_config(false), staged.is_bbl_vendor()};
+        } else {
+            const auto& choices = is_process ? staged.prints : staged.filaments;
+            const auto* candidate = choices.find_preset(name, false);
+            if (!candidate || candidate->name != name)
+                return;
+            const auto candidate_context = choices.get_preset_with_vendor_profile(*candidate);
+            const auto printer_context = staged.printers.get_edited_preset_with_vendor_profile();
+            if (!is_compatible_with_printer(candidate_context, printer_context) ||
+                (!is_process && !is_compatible_with_print(candidate_context,
+                    staged.prints.get_edited_preset_with_vendor_profile(), printer_context))) {
+                show_error(this, _L("This preset is incompatible with the selected plate's printer or process."));
+                return;
+            }
+
+            if (is_process) {
+                staged.prints.select_preset_by_name(name, true);
+                profile.config.apply_only(staged.full_config(false), Preset::print_options(), true);
+                profile.config.opt_string("print_settings_id", true) = name;
+            } else {
+                const auto* saved = profile.config.option<ConfigOptionStrings>("filament_settings_id");
+                const auto* mixed = profile.config.option<ConfigOptionBools>("filament_is_mixed");
+                if (!saved || slot >= saved->values.size() || staged.filament_presets.size() != saved->values.size() ||
+                    (mixed && slot < mixed->values.size() && mixed->values[slot])) {
+                    show_error(this, _L("The plate's saved filament slots could not be restored."));
+                    return;
+                }
+                auto filament_names = saved->values;
+                if (slot == 0)
+                    staged.filaments.select_preset_by_name(name, true);
+                staged.set_filament_preset(slot, name);
+                filament_names[slot] = name;
+                auto updated = staged.full_config(false);
+                // Retain the captured machine and process settings when changing a filament.
+                updated.apply_only(profile.config, Preset::printer_options(), true);
+                updated.apply_only(profile.config, Preset::print_options(), true);
+                updated.opt_string("printer_settings_id", true) = profile.config.opt_string("printer_settings_id");
+                updated.opt_string("print_settings_id", true) = profile.config.opt_string("print_settings_id");
+                updated.option<ConfigOptionStrings>("filament_settings_id", true)->values = std::move(filament_names);
+                profile.config = std::move(updated);
+            }
+        }
+
+        profile.config.update_plugin_manifest();
+        profile.remove_local_settings();
+        if (!profile.valid()) {
+            show_error(this, _L("The updated plate configuration is incomplete."));
+            return;
+        }
+    } catch (const std::exception& error) {
+        show_error(this, from_u8(error.what()));
+        return;
+    }
+
+    take_snapshot(_u8L("Change plate preset"));
+    if (is_printer)
+        p->partplate_list.reload_all_objects();
+    plate->set_printer_profile(std::move(profile), is_printer);
+    if (is_printer)
+        p->partplate_list.refresh_printer_profile_layout();
+    set_plater_dirty(true);
+    mark_plate_toolbar_image_dirty();
+    update();
+    p->sidebar->refresh_plate_presets();
 }
 
 void Plater::open_filament_map_setting_dialog(wxCommandEvent &evt)
@@ -23796,16 +24600,7 @@ int Plater::select_plate_by_hover_id(int hover_id, bool right_click, bool isModi
 
             part_plate->get_print(&print, &gcode_result, NULL);
             //always apply the current plate's print
-            if (preset_bundle->get_printer_extruder_count() > 1) {
-                std::vector<int> f_maps = part_plate->get_real_filament_maps(preset_bundle->project_config);
-                std::vector<int> f_volume_maps = part_plate->get_filament_volume_maps();
-                if (f_volume_maps.empty()) {
-                    f_volume_maps = preset_bundle->get_default_nozzle_volume_types_for_filaments(f_maps);
-                }
-                invalidated = p->background_process.apply(this->model(), preset_bundle->full_config(false, f_maps, f_volume_maps));
-            }
-            else
-                invalidated = p->background_process.apply(this->model(), preset_bundle->full_config(false));
+            invalidated = p->background_process.apply(this->model(), *preset_bundle);
             bool model_fits, validate_err;
             validate_current_plate(model_fits, validate_err);
 
@@ -24037,11 +24832,18 @@ int Plater::add_plate()
     if (!p->can_add_plate())
         return -1;
     take_snapshot("add partplate");
-    int new_plate = p->partplate_list.create_plate();
+    const auto* selected = p->partplate_list.get_selected_plate();
+    PlatePrinterProfile profile;
+    if (selected && selected->printer_profile().assigned()) {
+        profile = selected->printer_profile();
+        profile.config.set_key_value("curr_bed_type", new ConfigOptionEnum<BedType>(selected->get_bed_type(true)));
+    }
+    int new_plate = p->partplate_list.create_plate(true, profile.assigned() ? &profile : nullptr);
     if (new_plate < 0)
         return new_plate;
     p->partplate_list.select_plate(new_plate);
     update();
+    p->sidebar->refresh_plate_presets();
 
     // BBS set default view
     //get_camera().select_view("topfront");
@@ -24090,7 +24892,23 @@ int Plater::delete_plate(int plate_index)
 //BBS: set bed positions
 void Plater::set_bed_position(Vec2d& pos)
 {
-    p->bed.set_position(pos);
+    const auto& profile = p->partplate_list.get_curr_plate()->printer_profile();
+    if (!profile.assigned() && !p->showing_plate_printer_bed) {
+        p->bed.set_position(pos);
+        return;
+    }
+
+    const auto& config = profile.assigned() ? profile.config : *p->config;
+    const bool changed = p->bed.set_shape(make_counter_clockwise(config.option<ConfigOptionPoints>("printable_area")->values),
+                                          config.opt_float("printable_height"),
+                                          config.option<ConfigOptionPointsGroups>("extruder_printable_area")->values,
+                                          config.option<ConfigOptionFloatsNullable>("extruder_printable_height")->values,
+                                          config.opt_string("bed_custom_model"), profile.assigned(), pos);
+    p->showing_plate_printer_bed = profile.assigned();
+    if (changed) {
+        if (p->view3D) p->view3D->bed_shape_changed();
+        if (p->preview) p->preview->bed_shape_changed();
+    }
 }
 
 //BBS: is the background process slicing currently
@@ -24248,6 +25066,8 @@ void Plater::update_objects_position_when_select_preset(const std::function<void
 
 bool Plater::check_ams_status(bool is_slice_all)
 {
+    if (p->partplate_list.has_printer_profiles())
+        return true;
     if (m_check_status == 0) {
         if (!p->check_ams_status_impl(is_slice_all)) {
             m_check_status = 0;

@@ -90,6 +90,7 @@
 #include "GUI_App.hpp"
 #include "libslic3r/AppConfig.hpp"
 #include "libslic3r/PresetBundle.hpp"
+#include "libslic3r/Geometry/PlateLayout.hpp"
 #include "BackgroundSlicingProcess.hpp"
 #include "Widgets/Label.hpp"
 #include "2DBed.hpp"
@@ -130,6 +131,9 @@ static const float GRABBER_Z_VALUE = 0.5f;
 static unsigned int GLOBAL_PLATE_INDEX = 0;
 
 static const double LOGICAL_PART_PLATE_GAP = 1. / 5.;
+static constexpr double COMPACT_PLATE_GAP = 24.;
+static constexpr float BBL_PLATE_LOGO_EXTENSION = 12.f;
+static constexpr int PROFILE_PLATE_LABEL_LINES = 2;
 static const int PARTPLATE_ICON_SIZE = 16;
 static const int PARTPLATE_EDIT_PLATE_NAME_ICON_SIZE = 9; // ORCA this also scales height of plate name
 static const int PARTPLATE_ICON_GAP_TOP = 3;
@@ -273,10 +277,14 @@ BedType PartPlate::get_bed_type(bool load_from_project) const
 		return bed_type;
 	}
 
-	if (!load_from_project || !m_plater || !wxGetApp().preset_bundle)
+	if (!load_from_project)
+		return btDefault;
+	if (m_printer_profile.assigned())
+		return m_printer_profile.config.opt_enum<BedType>(bed_type_key);
+	if (!m_plater || !wxGetApp().preset_bundle)
 		return btDefault;
 
-	DynamicConfig& proj_cfg = wxGetApp().preset_bundle->project_config;
+	const DynamicConfig& proj_cfg = wxGetApp().preset_bundle->project_config;
 	if (proj_cfg.has(bed_type_key))
 		return proj_cfg.opt_enum<BedType>(bed_type_key);
 	return btDefault;
@@ -290,18 +298,10 @@ void PartPlate::set_bed_type(BedType bed_type)
     assert(m_plater != nullptr);
 
     // update slice state
-    BedType old_real_bed_type = get_bed_type();
-    if (old_real_bed_type == btDefault) {
-        DynamicConfig& proj_cfg = wxGetApp().preset_bundle->project_config;
-        if (proj_cfg.has(bed_type_key))
-            old_real_bed_type = proj_cfg.opt_enum<BedType>(bed_type_key);
-    }
-    BedType new_real_bed_type = bed_type;
-    if (bed_type == BedType::btDefault) {
-        DynamicConfig& proj_cfg = wxGetApp().preset_bundle->project_config;
-        if (proj_cfg.has(bed_type_key))
-            new_real_bed_type = proj_cfg.opt_enum<BedType>(bed_type_key);
-    }
+    const BedType old_real_bed_type = get_bed_type(true);
+    const auto& base = m_printer_profile.assigned() ? m_printer_profile.config : wxGetApp().preset_bundle->project_config;
+    const BedType new_real_bed_type = bed_type == btDefault && base.has(bed_type_key) ?
+        base.opt_enum<BedType>(bed_type_key) : bed_type;
     if (old_real_bed_type != new_real_bed_type) {
         update_slice_result_valid_state(false);
     }
@@ -370,7 +370,8 @@ PrintSequence PartPlate::get_print_seq() const
 
 PrintSequence PartPlate::get_real_print_seq(bool* plate_same_as_global) const
 {
-	PrintSequence global_print_seq = wxGetApp().global_print_sequence();
+	PrintSequence global_print_seq = m_printer_profile.assigned() ?
+	    m_printer_profile.config.opt_enum<PrintSequence>("print_sequence") : wxGetApp().global_print_sequence();
     PrintSequence curr_plate_seq = get_print_seq();
     if (curr_plate_seq == PrintSequence::ByDefault) {
 		curr_plate_seq = global_print_seq;
@@ -433,7 +434,8 @@ bool PartPlate::get_spiral_vase_mode() const
 		return m_config.opt_bool(key);
 	}
 	else {
-		DynamicPrintConfig* global_config = &wxGetApp().preset_bundle->prints.get_edited_preset().config;
+		const auto* global_config = m_printer_profile.assigned() ? &m_printer_profile.config :
+		    &wxGetApp().preset_bundle->prints.get_edited_preset().config;
 		if (global_config->has(key))
 			return global_config->opt_bool(key);
 	}
@@ -442,8 +444,9 @@ bool PartPlate::get_spiral_vase_mode() const
 
 std::vector<Vec2d> PartPlate::get_plate_wrapping_detection_area() const
 {
-    DynamicPrintConfig  gconfig                  = wxGetApp().preset_bundle->printers.get_edited_preset().config;
-    ConfigOptionPoints *wrapping_exclude_area_opt = gconfig.option<ConfigOptionPoints>("wrapping_exclude_area");
+    const auto& gconfig = m_printer_profile.assigned() ? m_printer_profile.config :
+        wxGetApp().preset_bundle->printers.get_edited_preset().config;
+    const auto* wrapping_exclude_area_opt = gconfig.option<ConfigOptionPoints>("wrapping_exclude_area");
     if (wrapping_exclude_area_opt) {
         std::vector<Vec2d> wrapping_area = wrapping_exclude_area_opt->values;
         for (Vec2d& pt : wrapping_area) {
@@ -1637,12 +1640,16 @@ void PartPlate::calc_height_limit() {
 // The plate's icons and labels grow with its depth, but they sit in the gap to the
 // next plate, which grows with its width: on a long, narrow bed (a belt) they would
 // otherwise run across the neighbouring plate.
-float PartPlate::icon_scale_factor() const
+static float plate_icon_scale_factor(const BoundingBoxf& bed_ext)
 {
-    const BoundingBoxf bed_ext  = get_extents(m_shape);
     const double       by_depth = bed_ext.size().y() / 200.;
     const double       by_gap   = bed_ext.size().x() * LOGICAL_PART_PLATE_GAP / (PARTPLATE_ICON_SIZE + 2 * PARTPLATE_ICON_GAP_LEFT);
     return float(std::min(by_depth, by_gap));
+}
+
+float PartPlate::icon_scale_factor() const
+{
+    return plate_icon_scale_factor(get_extents(m_shape));
 }
 
 void PartPlate::calc_vertex_for_number(int index, bool one_number, GLModel &buffer)
@@ -1677,7 +1684,7 @@ void PartPlate::calc_vertex_for_number(int index, bool one_number, GLModel &buff
 		BOOST_LOG_TRIVIAL(error) << __FUNCTION__ << "Unable to generate geometry buffers for icons\n";
 }
 
-void PartPlate::calc_vertex_for_plate_name_edit_icon(GLTexture *texture, int index, PickingModel &model) {
+void PartPlate::calc_vertex_for_plate_name_edit_icon(float name_width, PickingModel &model) {
     model.reset();
 
     ExPolygon poly;
@@ -1688,11 +1695,6 @@ void PartPlate::calc_vertex_for_plate_name_edit_icon(GLTexture *texture, int ind
     float width    = icon_sz;
     float height   = icon_sz;
     float offset_y = factor * PARTPLATE_TEXT_OFFSET_Y;
-
-    float name_width = 0.0;
-    if (texture && texture->get_width() > 0 && texture->get_height())
-        // original width give correct ratio in here since rendering width can be much higher because of next_highest_power_of_2 for rendering
-        name_width = icon_sz * texture->m_original_width / texture->get_height(); 
 
     //if (m_plater && m_plater->get_build_volume_type() == BuildVolume_Type::Circle)
     //    px = scale_(bed_ext.center()(0)) + m_name_texture_width * 0.50 - height * 0.50;
@@ -1860,6 +1862,9 @@ void PartPlate::render_logo_texture(GLTexture &logo_texture, GLModel& logo_buffe
 
 void PartPlate::render_logo(bool bottom, bool render_cali)
 {
+	// The texture cache belongs to the project printer's bed geometry.
+	if (m_printer_profile.assigned())
+		return;
 	if (!m_partplate_list->render_bedtype_logo) {
 		// render third-party printer texture logo
 		if (!m_partplate_list->load_logo_texture())
@@ -2503,10 +2508,21 @@ void PartPlate::render_icon_texture(GLModel &buffer, GLTexture &texture)
 	glsafe(::glBindTexture(GL_TEXTURE_2D, 0));
 }
 
+static std::string plate_label_text(const PartPlate& plate)
+{
+    const auto& profile = plate.printer_profile();
+    const auto* bundle = wxGetApp().preset_bundle;
+    const std::string printer_name = profile.assigned() ? profile.config.opt_string("printer_settings_id") :
+        (bundle ? bundle->printers.get_edited_preset().name : std::string());
+    const wxString printer = printer_name.empty() ? _L("Project printer") : from_u8(printer_name);
+    const wxString name = plate.get_plate_name().empty() ? _L("Untitled") : from_u8(plate.get_plate_name());
+    return into_u8(printer + "\n" + name);
+}
+
 void PartPlate::render_plate_name_texture()
 {
-	if (m_plate_name_edit_icon.mesh_raycaster == nullptr)
-		generate_plate_name_texture();
+	if (m_plate_name_edit_icon.mesh_raycaster == nullptr || m_name_texture.get_source() != plate_label_text(*this))
+        generate_plate_name_texture();
 
 	if (m_name_texture.get_id() == 0)
 		return;
@@ -2667,7 +2683,7 @@ void PartPlate::render_icons(bool bottom, bool only_name, int hover_id)
             }
 
 			if (m_partplate_list->render_plate_settings) {
-				bool has_plate_settings = get_bed_type() != BedType::btDefault || get_print_seq() != PrintSequence::ByDefault || !get_first_layer_print_sequence().empty() || !get_other_layers_print_sequence().empty() || has_spiral_mode_config();
+				bool has_plate_settings = m_printer_profile.assigned() || get_bed_type() != BedType::btDefault || get_print_seq() != PrintSequence::ByDefault || !get_first_layer_print_sequence().empty() || !get_other_layers_print_sequence().empty() || has_spiral_mode_config();
                 if (hover_id == 5) {
                     if (!has_plate_settings)
                         render_icon_texture(m_plate_settings_icon.model, m_partplate_list->m_plate_settings_hovered_texture);
@@ -3000,6 +3016,8 @@ std::vector<int> PartPlate::get_extruders(bool conside_custom_gcode, bool expand
     if (check_objects_empty_and_gcode3mf(plate_extruders)) {
         return plate_extruders;
     }
+	if (m_printer_profile.assigned())
+		return get_extruders(conside_custom_gcode, m_printer_profile.config, m_printer_profile.config, expand_mixed_slots);
 	return get_extruders(conside_custom_gcode, wxGetApp().preset_bundle->prints.get_edited_preset().config, wxGetApp().preset_bundle->project_config, expand_mixed_slots);
 }
 
@@ -4108,9 +4126,89 @@ void PartPlate::clear(bool clear_sliced_result)
 	return;
 }
 
+DynamicPrintConfig PartPlate::build_print_config(PresetBundle& bundle) const
+{
+    DynamicPrintConfig config;
+    if (m_printer_profile.assigned()) {
+        config = m_printer_profile.config;
+    } else if (bundle.get_printer_extruder_count() > 1) {
+        auto filament_maps = get_real_filament_maps(bundle.project_config);
+        auto volume_maps = get_filament_volume_maps();
+        if (volume_maps.empty())
+            volume_maps = bundle.get_default_nozzle_volume_types_for_filaments(filament_maps);
+        config = bundle.full_config(false, std::move(filament_maps), std::move(volume_maps));
+    } else {
+        config = bundle.full_config(false);
+    }
+    config.apply(m_config);
+    return config;
+}
+
+void PartPlate::set_printer_profile(PlatePrinterProfile profile, bool reset_machine_overrides)
+{
+    m_printer_profile = std::move(profile);
+    invalidate_plate_name_texture();
+    // These overrides refer to the former machine's bed types or tool layout.
+    if (reset_machine_overrides)
+        for (const char* key : {"curr_bed_type", "filament_map", "filament_volume_map", "filament_nozzle_map", "filament_map_mode"})
+            m_config.erase(key);
+    update_slice_result_valid_state(false);
+    if (m_print)
+        m_print->set_gcode_file_invalidated();
+}
+
+void PartPlate::update_model_print_volume_state()
+{
+    const BuildVolume volume(m_shape, m_height, m_extruder_areas, m_extruder_heights);
+    const bool mixed = m_partplate_list->has_printer_profiles();
+    if (!mixed) {
+        m_model->update_print_volume_state(volume);
+        return;
+    }
+
+    const bool open_y = belt_open_y();
+    for (size_t object = 0; object < m_model->objects.size(); ++object) {
+        const auto& instances = m_model->objects[object]->instances;
+        for (size_t instance = 0; instance < instances.size(); ++instance) {
+            ModelInstance& item = *instances[instance];
+            if (!contain_instance(object, instance)) {
+                item.print_volume_state = ModelInstancePVS_Fully_Outside;
+            } else {
+                item.print_volume_state = item.calc_print_volume_state(volume);
+                if (open_y && item.print_volume_state != ModelInstancePVS_Inside && !check_outside(object, instance))
+                    item.print_volume_state = ModelInstancePVS_Inside;
+            }
+        }
+    }
+}
+
+std::string PartPlate::printer_profile_slice_error()
+{
+    if (!m_partplate_list->has_printer_profiles())
+        return {};
+
+    for (const auto& [object_id, instance_id] : obj_to_instance_set) {
+        if (!valid_instance(object_id, instance_id))
+            continue;
+        const ModelObject* object = m_model->objects[object_id];
+        const ModelInstance* instance = object->instances[instance_id];
+        if (object->printable && instance->printable &&
+            (instance->print_volume_state != ModelInstancePVS_Inside || check_outside(object_id, instance_id)))
+            return _u8L("An object does not fit the build volume of this plate's printer.");
+    }
+    if (m_printer_profile.assigned()) {
+        const auto& config = m_printer_profile.config;
+        const auto filaments = get_extruders(true, config, config, false);
+        const auto slot_count = config.option<ConfigOptionStrings>("filament_type")->values.size();
+        if (std::any_of(filaments.begin(), filaments.end(), [slot_count](int id) { return id > 0 && size_t(id) > slot_count; }))
+            return _u8L("An object uses a filament slot that is missing from this plate's printer profile.");
+    }
+    return {};
+}
+
 /* size and position related functions*/
 //set position and size
-void PartPlate::set_pos_and_size(Vec3d& origin, int width, int depth, double height, bool with_instance_move, bool do_clear)
+void PartPlate::set_pos_and_size(Vec3d& origin, int width, int depth, double height, bool with_instance_move, bool do_clear, bool center_on_resize)
 {
 	bool size_changed = false; //size changed means the machine changed
 	bool pos_changed = false;
@@ -4141,9 +4239,13 @@ void PartPlate::set_pos_and_size(Vec3d& origin, int width, int depth, double hei
 
 			//move this instance into the new plate's same position
 			Vec3d offset = instance->get_transformation().get_offset();
-			int off_x, off_y;
+			double off_x, off_y;
 
-			if (size_changed)
+			if (!center_on_resize) {
+				off_x = origin.x() - m_origin.x();
+				off_y = origin.y() - m_origin.y();
+			}
+			else if (size_changed)
 			{
 				//change position due to the bed size changes
 				//off_x = (width - m_width) * m_plate_index + (width - m_width) / 2;
@@ -4157,8 +4259,8 @@ void PartPlate::set_pos_and_size(Vec3d& origin, int width, int depth, double hei
 				off_x = origin.x() - m_origin.x();
 				off_y = origin.y() - m_origin.y();
 			}
-			offset.x() = offset.x() + off_x;
-			offset.y() = offset.y() + off_y;
+			offset.x() += center_on_resize ? static_cast<int>(off_x) : off_x;
+			offset.y() += center_on_resize ? static_cast<int>(off_y) : off_y;
 
 			BOOST_LOG_TRIVIAL(info) << __FUNCTION__ << boost::format(": object %1%, instance %2%, moved {%3%,%4%} to {%5%, %6%}")\
 				% obj_id % instance_id % off_x % off_y % offset.x() % offset.y();
@@ -4209,15 +4311,13 @@ void PartPlate::generate_plate_name_texture()
 
 	// generate m_name_texture texture from m_name with generate_from_text_string
 	m_name_texture.reset();
-	auto text = m_name.empty()? _L("Untitled") : from_u8(m_name);
-
     // ORCA also scale font size to prevent low res texture
     int size = wxGetApp().em_unit() * PARTPLATE_EDIT_PLATE_NAME_ICON_SIZE;
     auto l = Label::sysFont(size, true);
     wxFont* font = &l;
 
 	wxColour foreground(0xf2, 0x75, 0x4e, 0xff);
-	if (!m_name_texture.generate_from_text_string(text.ToUTF8().data(), *font, *wxBLACK, foreground)) {
+	if (!m_name_texture.generate_from_text_string(plate_label_text(*this), *font, *wxBLACK, foreground)) {
 		BOOST_LOG_TRIVIAL(error) << "PartPlate::generate_plate_name_texture(): generate_from_text_string() failed";
 		return;
 	}
@@ -4227,8 +4327,9 @@ void PartPlate::generate_plate_name_texture()
     Vec2d p        = bed_ext[3];
     float factor   = icon_scale_factor();
     float icon_sz  = factor * PARTPLATE_EDIT_PLATE_NAME_ICON_SIZE;
-    float width    = icon_sz * m_name_texture.get_width() / m_name_texture.get_height(); // icon size * text_bb_ratio
-    float height   = icon_sz; // scale with icon size to preserve ratio while system scaling
+    float height   = icon_sz * PROFILE_PLATE_LABEL_LINES;
+    float texture_scale = height / m_name_texture.get_height();
+    float width    = texture_scale * m_name_texture.get_width();
     float offset_y = factor * PARTPLATE_TEXT_OFFSET_Y;
 
     //if (m_plater && m_plater->get_build_volume_type() == BuildVolume_Type::Circle)
@@ -4245,7 +4346,7 @@ void PartPlate::generate_plate_name_texture()
         BOOST_LOG_TRIVIAL(error) << __FUNCTION__ << "Unable to generate geometry buffers for icons\n";
 
     canvas->remove_raycasters_for_picking(SceneRaycaster::EType::Bed, picking_id_component(6));
-    calc_vertex_for_plate_name_edit_icon(&m_name_texture, 0, m_plate_name_edit_icon);
+    calc_vertex_for_plate_name_edit_icon(texture_scale * m_name_texture.get_original_width(), m_plate_name_edit_icon);
     register_model_for_picking(*canvas, m_plate_name_edit_icon, picking_id_component(6));
 }
 
@@ -4972,7 +5073,7 @@ void PartPlate::generate_logo_polygon(ExPolygon &logo_polygon)
 		{
 			const Vec2d& p = m_shape[i];
 			if ((i  == 0) || (i  == 1)) {
-                logo_polygon.contour.append({scale_(p(0)), scale_(is_bbl_vendor ? p(1) - 12.f : p(1))});
+                logo_polygon.contour.append({scale_(p(0)), scale_(is_bbl_vendor ? p(1) - BBL_PLATE_LOGO_EXTENSION : p(1))});
             }
 			else {
 				logo_polygon.contour.append({ scale_(p(0)), scale_(p(1)) });
@@ -5215,11 +5316,11 @@ Polygon PartPlate::get_shared_printable_polygon() const
 
 bool PartPlate::belt_open_y() const
 {
-	// Headless (CLI) plates have no plater and no wxApp behind wxGetApp(); the CLI's own belt
-	// handling lives in Print::validate().
-	if (m_plater == nullptr || wxGetApp().preset_bundle == nullptr)
+	// A headless plate can only read its own configuration.
+	if (!m_printer_profile.assigned() && (m_plater == nullptr || wxGetApp().preset_bundle == nullptr))
 		return false;
-	const DynamicPrintConfig &printer = wxGetApp().preset_bundle->printers.get_edited_preset().config;
+	const DynamicPrintConfig &printer = m_printer_profile.assigned() ? m_printer_profile.config :
+	    wxGetApp().preset_bundle->printers.get_edited_preset().config;
 	const auto *belt       = printer.option<ConfigOptionBool>("belt_printer");
 	const auto *infinite_y = printer.option<ConfigOptionBool>("belt_printer_infinite_y");
 	return belt != nullptr && belt->value && infinite_y != nullptr && infinite_y->value;
@@ -5248,7 +5349,7 @@ bool PartPlate::contains(const BoundingBoxf3& bb) const
 	return print_volume.contains(bb);
 }
 
-bool PartPlate::intersects(const BoundingBoxf3& bb) const
+bool PartPlate::intersects(const BoundingBoxf3& bb, bool extend_belt) const
 {
 	// Allow the objects to protrude below the print bed
 	BoundingBoxf3 print_volume(Vec3d(m_bounding_box.min(0), m_bounding_box.min(1), 0.0), Vec3d(m_bounding_box.max(0), m_bounding_box.max(1), 1e3));
@@ -5257,7 +5358,8 @@ bool PartPlate::intersects(const BoundingBoxf3& bb) const
 	print_volume.min(1) -= Slic3r::BuildVolume::BedEpsilon;
 	print_volume.max(0) += Slic3r::BuildVolume::BedEpsilon;
 	print_volume.max(1) += Slic3r::BuildVolume::BedEpsilon;
-	this->open_belt_y(print_volume);
+	if (extend_belt)
+		this->open_belt_y(print_volume);
 	return print_volume.intersects(bb);
 }
 
@@ -5455,7 +5557,9 @@ int PartPlate::load_gcode_from_file(const std::string& filename)
 	if (f_volume_maps.empty()) {
 		f_volume_maps = preset_bundle->get_default_nozzle_volume_types_for_filaments(filament_maps);
 	}
-	DynamicPrintConfig full_config   = preset_bundle->full_config(false, filament_maps, f_volume_maps);
+	DynamicPrintConfig full_config = m_printer_profile.assigned() ? m_printer_profile.config :
+	    preset_bundle->full_config(false, filament_maps, f_volume_maps);
+	m_print->is_BBL_printer() = m_printer_profile.assigned() ? m_printer_profile.is_bambu : preset_bundle->is_bbl_vendor();
 	full_config.apply(m_config, true);
 	m_print->apply(*m_model, full_config, false);
 
@@ -5972,6 +6076,14 @@ Vec3d PartPlateList::compute_origin_using_new_size(int i, int new_width, int new
 //compute the origin for printable plate with index i
 Vec3d PartPlateList::compute_origin_for_unprintable()
 {
+	if (m_printer_profile_layout_pending)
+		return unprintable_plate.get_origin();
+    if (m_printer_profile_pitch.x() > 0) {
+        double rightmost_origin = 0.;
+        for (const Vec2d& offset : m_printer_profile_offsets)
+            rightmost_origin = std::max(rightmost_origin, offset.x());
+        return Vec3d(rightmost_origin + 2. * plate_stride_x(), 0., 0.);
+    }
 	int max_count = m_plate_cols * m_plate_cols;
 	if (m_plate_count == max_count)
 		return compute_origin(max_count + m_plate_cols - 1, m_plate_cols + 1);
@@ -5982,6 +6094,15 @@ Vec3d PartPlateList::compute_origin_for_unprintable()
 //compute shape position
 Vec2d PartPlateList::compute_shape_position(int index, int cols)
 {
+    if (m_printer_profile_layout_pending && index >= 0 && size_t(index) < m_plate_list.size())
+        return m_plate_list[index]->get_origin().head<2>();
+    if (index >= 0 && size_t(index) < m_printer_profile_offsets.size())
+        return m_printer_profile_offsets[index];
+    if (m_printer_profile_pitch.x() > 0) {
+        // A new plate gets its compact position once it joins the list.
+        return Vec2d(0., -index * plate_stride_y());
+    }
+
 	Vec2d pos;
 	int row, col;
 
@@ -6368,6 +6489,11 @@ void PartPlateList::reset_size(int width, int depth, double height, bool reload_
 		m_plate_width = width;
 		m_plate_depth = depth;
 		m_plate_height = height;
+		if (has_printer_profiles()) {
+			if (update_shapes)
+				set_shapes(m_shape, m_exclude_areas, m_wrapping_exclude_areas, m_extruder_areas, m_extruder_heights, m_logo_texture_filename, m_height_to_lid, m_height_to_rod);
+			return;
+		}
 		update_all_plates_pos_and_size(false, false, true);
 		if (update_shapes) {
 			set_shapes(m_shape, m_exclude_areas, m_wrapping_exclude_areas, m_extruder_areas, m_extruder_heights, m_logo_texture_filename, m_height_to_lid, m_height_to_rod);
@@ -6403,6 +6529,9 @@ void PartPlateList::clear(bool delete_plates, bool release_print_list, bool exce
 	{
 		//also delete print related to the plate
 		m_plate_list.clear();
+		m_printer_profile_pitch.setZero();
+		m_printer_profile_offsets.clear();
+		m_printer_profile_layout_pending = false;
 		m_current_plate = 0;
 	}
 
@@ -6513,7 +6642,7 @@ void PartPlateList::render_exclusion_volume_intersections(
     shader->stop_using();
 }
 
-int PartPlateList::create_plate(bool adjust_position)
+int PartPlateList::create_plate(bool adjust_position, const PlatePrinterProfile* row_profile)
 {
 	PartPlate* plate = NULL;
 	Vec3d origin;
@@ -6525,7 +6654,7 @@ int PartPlateList::create_plate(bool adjust_position)
 	int cols = compute_colum_count(new_index + 1);
 	int old_cols = compute_colum_count(new_index);
 	// Orca: Rebuild plate membership before moving instances during a grid reflow.
-	if (adjust_position && old_cols != cols)
+	if (adjust_position && (old_cols != cols || has_printer_profiles()))
 		reload_all_objects();
 
 	origin = compute_origin(new_index, cols);
@@ -6545,11 +6674,16 @@ int PartPlateList::create_plate(bool adjust_position)
 	plate->set_filament_count(m_filament_count);
 
 	plate->set_index(new_index);
+    if (row_profile && row_profile->assigned())
+        plate->set_printer_profile(*row_profile);
 	Vec2d pos = compute_shape_position(new_index, cols);
-	plate->set_shape(m_shape, m_exclude_areas, m_extruder_areas, m_extruder_heights, pos, m_height_to_lid, m_height_to_rod);
+	set_plate_shape(*plate, pos);
 	m_plate_list.emplace_back(plate);
 	update_plate_cols();
-	if (old_cols != cols)
+	if (has_printer_profiles()) {
+		refresh_printer_profile_layout();
+	}
+	else if (old_cols != cols)
 	{
 		BOOST_LOG_TRIVIAL(debug) << __FUNCTION__ << boost::format(":old_cols %1% -> new_cols %2%") % old_cols % cols;
 		//update the origin of each plate
@@ -6711,6 +6845,7 @@ int PartPlateList::delete_plate(int index)
 			wipe_tower_y->values.erase(wipe_tower_y->values.begin() + index);
 	}
 
+	const bool was_mixed = has_printer_profiles();
 	int cols = compute_colum_count(m_plate_list.size() - 1);
 	int old_cols = compute_colum_count(m_plate_list.size());
 
@@ -6730,11 +6865,10 @@ int PartPlateList::delete_plate(int index)
 
 		plate->set_index(i);
 		Vec3d origin = compute_origin(i, m_plate_cols);
-		plate->set_pos_and_size(origin, m_plate_width, m_plate_depth, m_plate_height, true);
-
-		//update render shapes
-		Vec2d pos = compute_shape_position(i, m_plate_cols);
-		plate->set_shape(m_shape, m_exclude_areas, m_extruder_areas, m_extruder_heights, pos, m_height_to_lid, m_height_to_rod);
+		if (!was_mixed) {
+			position_plate(*plate, origin, true, true);
+			set_plate_shape(*plate, compute_shape_position(i, m_plate_cols));
+		}
 	}
 
 	//update current_plate if delete current
@@ -6753,7 +6887,10 @@ int PartPlateList::delete_plate(int index)
 
 	unprintable_plate.set_index(m_plate_list.size());
 
-	if (old_cols != cols)
+	if (was_mixed) {
+		refresh_printer_profile_layout();
+	}
+	else if (old_cols != cols)
 	{
 		//update the origin of each plate
 		update_all_plates_pos_and_size();
@@ -6805,6 +6942,8 @@ bool PartPlateList::check_all_plate_local_bed_type(const std::vector<BedType> &c
     bool        is_ok        = true;
     for (int i = 0; i < m_plate_list.size(); i++) {
         PartPlate *plate = m_plate_list[i];
+        if (plate->printer_profile().assigned())
+            continue;
         if (plate->config()  && plate->config()->has(bed_type_key)) {
             BedType bed_type = plate->config()->opt_enum<BedType>(bed_type_key);
             if (bed_type == BedType::btDefault)
@@ -6977,8 +7116,101 @@ bool PartPlateList::contains(const BoundingBoxf3& bb)
 	return result;
 }
 
+bool PartPlateList::has_printer_profiles() const
+{
+    return std::any_of(m_plate_list.begin(), m_plate_list.end(), [](const PartPlate* plate) {
+        return plate->printer_profile().assigned();
+    });
+}
+
+void PartPlateList::update_printer_profile_layout()
+{
+    m_printer_profile_pitch.setZero();
+    m_printer_profile_offsets.clear();
+    if (!has_printer_profiles())
+        return;
+
+    // Keep the legacy grid pitch for loading older projects and placing the off-plate area.
+    BoundingBoxf envelope(m_shape);
+    envelope.merge(Vec2d::Zero());
+    std::vector<PlateLayoutInput> plates;
+    auto* bundle = m_plater ? wxGetApp().preset_bundle : nullptr;
+    const std::string project_preset = bundle ? bundle->printers.get_edited_preset().name : std::string();
+    for (const PartPlate* plate : m_plate_list) {
+        const auto& profile = plate->printer_profile();
+        const Pointfs& shape = profile.assigned() ?
+            profile.config.option<ConfigOptionPoints>("printable_area")->values : m_shape;
+        const BoundingBoxf bounds = shape.empty() ?
+            BoundingBoxf(Vec2d::Zero(), Vec2d(m_plate_width, m_plate_depth)) : get_extents(shape);
+        envelope.merge(bounds);
+        const std::string preset = profile.assigned() ? profile.config.opt_string("printer_settings_id") : project_preset;
+        const double labels = (PROFILE_PLATE_LABEL_LINES * PARTPLATE_EDIT_PLATE_NAME_ICON_SIZE +
+            PARTPLATE_TEXT_OFFSET_Y) * double(plate_icon_scale_factor(bounds));
+        const bool bambu = profile.assigned() ? profile.is_bambu : bundle && bundle->is_bbl_vendor();
+        plates.push_back({preset, bounds.min, bounds.size(), labels,
+                          bambu && shape.size() == 4 ? double(BBL_PLATE_LOGO_EXTENSION) : 0.});
+    }
+
+    m_printer_profile_pitch = envelope.size() * (1. + LOGICAL_PART_PLATE_GAP);
+    if (!m_printer_profile_layout_pending)
+        m_printer_profile_offsets = layout_printer_plates(plates, LOGICAL_PART_PLATE_GAP, COMPACT_PLATE_GAP);
+}
+
+void PartPlateList::position_plate(PartPlate& plate, Vec3d origin, bool move_instances, bool clear, bool keep_local)
+{
+    const auto& profile = plate.printer_profile();
+    if (profile.assigned()) {
+        const Vec2d size = get_extents(profile.config.option<ConfigOptionPoints>("printable_area")->values).size();
+        plate.set_pos_and_size(origin, std::ceil(size.x()), std::ceil(size.y()),
+                               profile.config.opt_float("printable_height"), move_instances, clear, false);
+    } else {
+        plate.set_pos_and_size(origin, m_plate_width, m_plate_depth, m_plate_height, move_instances, clear,
+                               !keep_local && !has_printer_profiles());
+    }
+}
+
+void PartPlateList::set_plate_shape(PartPlate& plate, Vec2d position)
+{
+    const auto& profile = plate.printer_profile();
+    if (profile.assigned()) {
+        const auto& config = profile.config;
+        plate.set_shape(make_counter_clockwise(config.option<ConfigOptionPoints>("printable_area")->values),
+                        config.option<ConfigOptionPoints>("bed_exclude_area")->values,
+                        config.option<ConfigOptionPointsGroups>("extruder_printable_area")->values,
+                        config.option<ConfigOptionFloatsNullable>("extruder_printable_height")->values,
+                        position, config.opt_float("extruder_clearance_height_to_lid"),
+                        config.opt_float("extruder_clearance_height_to_rod"));
+    } else {
+        plate.set_shape(m_shape, m_exclude_areas, m_extruder_areas, m_extruder_heights,
+                        position, m_height_to_lid, m_height_to_rod);
+    }
+}
+
+void PartPlateList::refresh_printer_profile_layout(bool move_loaded_instances)
+{
+    set_shapes(m_shape, m_exclude_areas, m_wrapping_exclude_areas, m_extruder_areas, m_extruder_heights,
+               m_logo_texture_filename, m_height_to_lid, m_height_to_rod, move_loaded_instances);
+    if (m_plater && !m_plate_list.empty()) {
+        Vec2d position = get_current_shape_position();
+        m_plater->set_bed_position(position);
+    }
+}
+
+void PartPlateList::finish_loading_printer_profile_layout()
+{
+    if (!m_printer_profile_layout_pending)
+        return;
+
+    // Use the saved bed positions to recover membership before moving any model.
+    reload_all_objects();
+    m_printer_profile_layout_pending = false;
+    refresh_printer_profile_layout(true);
+}
+
 double PartPlateList::plate_stride_x()
 {
+    if (m_printer_profile_pitch.x() > 0)
+        return m_printer_profile_pitch.x();
 	//const auto plate_shape = Slic3r::Polygon::new_scale(m_shape);
 	//double plate_width = plate_shape.bounding_box().size().x();
 	//return unscaled<double>((1. + LOGICAL_PART_PLATE_GAP) * plate_width);
@@ -6987,6 +7219,8 @@ double PartPlateList::plate_stride_x()
 
 double PartPlateList::plate_stride_y()
 {
+    if (m_printer_profile_pitch.y() > 0)
+        return m_printer_profile_pitch.y();
 	//const auto plate_shape = Slic3r::Polygon::new_scale(m_shape);
 	//double plate_depth = plate_shape.bounding_box().size().y();
 	//return unscaled<double>((1. + LOGICAL_PART_PLATE_GAP) * plate_depth);
@@ -7019,7 +7253,7 @@ void PartPlateList::update_plate_cols()
 	return;
 }
 
-void PartPlateList::update_all_plates_pos_and_size(bool adjust_position, bool with_unprintable_move, bool switch_plate_type, bool do_clear)
+void PartPlateList::update_all_plates_pos_and_size(bool adjust_position, bool with_unprintable_move, bool switch_plate_type, bool do_clear, bool keep_local)
 {
 	Vec3d origin1, origin2;
 	for (unsigned int i = 0; i < (unsigned int)m_plate_list.size(); ++i)
@@ -7029,7 +7263,7 @@ void PartPlateList::update_all_plates_pos_and_size(bool adjust_position, bool wi
 
 		//compute origin1 for PartPlate
 		origin1 = compute_origin(i, m_plate_cols);
-		plate->set_pos_and_size(origin1, m_plate_width, m_plate_depth, m_plate_height, adjust_position, do_clear);
+		position_plate(*plate, origin1, adjust_position, do_clear, keep_local);
 
 		// set default wipe pos when switch plate
         if (switch_plate_type && m_plater/* && plate->get_used_extruders().size() <= 0*/) {
@@ -7038,7 +7272,7 @@ void PartPlateList::update_all_plates_pos_and_size(bool adjust_position, bool wi
 	}
 
 	origin2 = compute_origin_for_unprintable();
-	unprintable_plate.set_pos_and_size(origin2, m_plate_width, m_plate_depth, m_plate_height, with_unprintable_move);
+	unprintable_plate.set_pos_and_size(origin2, m_plate_width, m_plate_depth, m_plate_height, with_unprintable_move, do_clear, !keep_local);
 }
 
 //move the plate to position index
@@ -7066,6 +7300,7 @@ int PartPlateList::move_plate_to_index(int old_index, int new_index)
 		delta = -1;
 	}
 
+	const bool mixed = has_printer_profiles();
 	PartPlate* plate = m_plate_list[old_index];
 	//update the plates between old_index and new_index
 	for (unsigned int i = (unsigned int)old_index; i != (unsigned int)new_index; i = i + delta)
@@ -7073,16 +7308,22 @@ int PartPlateList::move_plate_to_index(int old_index, int new_index)
 		m_plate_list[i] = m_plate_list[i + delta];
 		m_plate_list[i]->set_index(i);
 
-		origin = compute_origin(i, m_plate_cols);
-		m_plate_list[i]->set_pos_and_size(origin, m_plate_width, m_plate_depth, m_plate_height, true);
+		if (!mixed) {
+			origin = compute_origin(i, m_plate_cols);
+			position_plate(*m_plate_list[i], origin, true, true);
+		}
 	}
-	origin = compute_origin(new_index, m_plate_cols);
 	m_plate_list[new_index] = plate;
 	plate->set_index(new_index);
-	plate->set_pos_and_size(origin, m_plate_width, m_plate_depth, m_plate_height, true);
+	if (!mixed) {
+		origin = compute_origin(new_index, m_plate_cols);
+		position_plate(*plate, origin, true, true);
+	}
 
 	//update the new plate index
 	m_current_plate = new_index;
+	if (has_printer_profiles())
+		refresh_printer_profile_layout();
 
 	return ret;
 }
@@ -7151,6 +7392,11 @@ int PartPlateList::find_instance(int obj_id, int instance_id)
 //this function only judges whether it is intersect with plate
 int PartPlateList::find_instance(BoundingBoxf3& bounding_box)
 {
+	if (has_printer_profiles())
+		for (size_t i = 0; i < m_plate_list.size(); ++i)
+			if (m_plate_list[i]->intersects(bounding_box, false))
+				return int(i);
+
 	int ret = -1;
 
 	//update the plates after it
@@ -7430,6 +7676,7 @@ int PartPlateList::reload_all_objects(bool except_locked, int plate_index)
 {
 	int ret = 0;
 	unsigned int i, j, k;
+	const bool mixed = has_printer_profiles();
 
 	clear(false, false, except_locked, plate_index);
 
@@ -7447,7 +7694,12 @@ int PartPlateList::reload_all_objects(bool except_locked, int plate_index)
 				PartPlate* plate = m_plate_list[k];
 				assert(plate != NULL);
 
-				if (plate->intersect_instance(i, j, &boundingbox))
+				// A belt's open Y axis must not capture objects sitting on a different bed.
+				if (plate->intersect_instance(i, j, &boundingbox) &&
+				    (!mixed || !plate->belt_open_y() ||
+				     std::none_of(m_plate_list.begin(), m_plate_list.end(), [&](PartPlate* other) {
+				         return other != plate && other->intersects(boundingbox, false);
+				     })))
 				{
 					//found a new plate, add it to plate
 					plate->add_instance(i, j, false, &boundingbox);
@@ -7621,17 +7873,23 @@ bool PartPlateList::preprocess_arrange_polygon_other_locked(int obj_index, int i
 }
 
 bool PartPlateList::preprocess_exclude_areas(arrangement::ArrangePolygons &unselected, const DynamicPrintConfig &config,
-                                             bool enable_wrapping_detect, int num_plates, float inflation)
+                                             bool enable_wrapping_detect, int num_plates, float inflation,
+                                             const PartPlate* reference_plate)
 {
 	bool added = false;
+	const PartPlate* plate = reference_plate ? reference_plate : m_plate_list.front();
+	const auto& profile = plate->printer_profile();
+	const Pointfs& wrapping = reference_plate && profile.assigned() ?
+	    profile.config.option<ConfigOptionPoints>("wrapping_exclude_area")->values : m_wrapping_exclude_areas;
+	const Vec3d origin = reference_plate ? plate->m_origin : Vec3d(0., 0., 0.);
 
 	// wrapping detection area
     if (enable_wrapping_detect)
 	{
-        if (!m_wrapping_exclude_areas.empty())
+        if (!wrapping.empty())
 		{
 			Polygon ap{};
-            for (const Vec2d &p : m_wrapping_exclude_areas)
+            for (const Vec2d &p : wrapping)
 			{
                 ap.append({scale_(p(0)), scale_(p(1))});
             }
@@ -7693,17 +7951,19 @@ bool PartPlateList::preprocess_exclude_areas(arrangement::ArrangePolygons &unsel
 
     // Keep Orca's established legacy-area arrange obstacle alongside any
     // explicit collision-volume blockers. The two settings are additive.
-    if (!m_exclude_areas.empty()) {
-		//has exclude areas
-		PartPlate *plate = m_plate_list[0];
-
+	// excluded area
+	if (!plate->m_exclude_bounding_box.empty())
+	{
 		for (int index = 0; index < plate->m_exclude_bounding_box.size(); index ++)
 		{
+			const auto& box = plate->m_exclude_bounding_box[index];
+			const Vec3d min = box.min - origin;
+			const Vec3d max = box.max - origin;
 			Polygon ap({
-				{scaled(plate->m_exclude_bounding_box[index].min.x()), scaled(plate->m_exclude_bounding_box[index].min.y())},
-				{scaled(plate->m_exclude_bounding_box[index].max.x()), scaled(plate->m_exclude_bounding_box[index].min.y())},
-				{scaled(plate->m_exclude_bounding_box[index].max.x()), scaled(plate->m_exclude_bounding_box[index].max.y())},
-				{scaled(plate->m_exclude_bounding_box[index].min.x()), scaled(plate->m_exclude_bounding_box[index].max.y())}
+				{scaled(min.x()), scaled(min.y())},
+				{scaled(max.x()), scaled(min.y())},
+				{scaled(max.x()), scaled(max.y())},
+				{scaled(min.x()), scaled(max.y())}
 				});
 
 			for (int j = 0; j < num_plates; j++)
@@ -8011,7 +8271,8 @@ bool PartPlateList::set_shapes(const Pointfs              &shape,
                                const std::vector<double>  &extruder_heights,
                                const std::string          &texture_filename,
                                float                       height_to_lid,
-                               float                       height_to_rod)
+                               float                       height_to_rod,
+                               bool                        move_loaded_instances)
 {
 	const std::lock_guard<std::mutex> local_lock(m_plates_mutex);
 	m_shape = shape;
@@ -8022,18 +8283,15 @@ bool PartPlateList::set_shapes(const Pointfs              &shape,
 	m_height_to_lid = height_to_lid;
 	m_height_to_rod = height_to_rod;
 
-	double stride_x = plate_stride_x();
-	double stride_y = plate_stride_y();
-	for (unsigned int i = 0; i < (unsigned int)m_plate_list.size(); ++i)
-	{
-		PartPlate* plate = m_plate_list[i];
-		assert(plate != NULL);
-
-		Vec2d pos;
-
-		pos = compute_shape_position(i, m_plate_cols);
-		plate->set_shape(shape, exclude_areas, extruder_areas, extruder_heights, pos, height_to_lid, height_to_rod);
+	const bool used_profile_pitch = m_printer_profile_pitch.x() > 0;
+	update_printer_profile_layout();
+	if (used_profile_pitch || has_printer_profiles()) {
+		const bool move_instances = !m_printer_profile_layout_pending &&
+			(move_loaded_instances || (m_plater && !m_plater->is_loading_project()));
+		update_all_plates_pos_and_size(move_instances, move_instances, false, false, true);
 	}
+	for (size_t i = 0; i < m_plate_list.size(); ++i)
+		set_plate_shape(*m_plate_list[i], compute_shape_position(i, m_plate_cols));
 	is_load_bedtype_textures = false; //reload textures
     is_load_extruder_only_area_textures = false; // reload textures
 	m_next_bedtype_texture = 0;
@@ -8215,7 +8473,9 @@ int PartPlateList::rebuild_plates_after_deserialize(std::vector<bool>& previous_
         partplate->printer_technology = this->printer_technology;
     }
 	update_plate_cols();
-	update_all_plates_pos_and_size(false, false, false, false);
+	update_printer_profile_layout();
+	const bool has_profiles = has_printer_profiles();
+	update_all_plates_pos_and_size(has_profiles, has_profiles, false, false, true);
 	set_shapes(m_shape, m_exclude_areas, m_wrapping_exclude_areas, m_extruder_areas, m_extruder_heights, m_logo_texture_filename, m_height_to_lid, m_height_to_rod);
 	for (unsigned int i = 0; i < (unsigned int)m_plate_list.size(); ++i)
 	{
@@ -8378,6 +8638,9 @@ int PartPlateList::store_to_3mf_structure(PlateDataPtrs& plate_data_list, bool w
 		BOOST_LOG_TRIVIAL(info) << __FUNCTION__ << boost::format(": plate %1% after load, width %2%, height %3%, size %4%!")
 			%(i+1) %plate_data_item->plate_thumbnail.width %plate_data_item->plate_thumbnail.height %plate_data_item->plate_thumbnail.pixels.size();
 		plate_data_item->config.apply(*m_plate_list[i]->config());
+		plate_data_item->printer_profile = m_plate_list[i]->printer_profile();
+		if (has_printer_profiles())
+			plate_data_item->printer_profile_origin = Vec2d(m_plate_list[i]->get_origin().head<2>());
 
 		if (m_plate_list[i]->no_light_thumbnail_data.is_valid())
 			plate_data_item->no_light_thumbnail_file = "valid_no_light";
@@ -8487,6 +8750,9 @@ int PartPlateList::load_from_3mf_structure(PlateDataPtrs& plate_data_list, int f
 	for (unsigned int i = 0; i < (unsigned int)plate_data_list.size(); ++i)
 	{
 		int index = create_plate(false);
+		// Restore the printer context before constructing the plate's print state.
+		// get_print() below must see the saved machine, not the project default.
+		m_plate_list[index]->m_printer_profile = plate_data_list[i]->printer_profile;
 		m_plate_list[index]->m_locked = plate_data_list[i]->locked;
 		m_plate_list[index]->config()->apply(plate_data_list[i]->config);
 		m_plate_list[index]->set_plate_name(plate_data_list[i]->plate_name);
@@ -8625,6 +8891,28 @@ int PartPlateList::load_from_3mf_structure(PlateDataPtrs& plate_data_list, int f
 		}
 
 	}
+	if (has_printer_profiles()) {
+		m_printer_profile_layout_pending = true;
+		update_printer_profile_layout();
+		// Older per-plate projects stored their objects in the original grid.
+		for (int i = 0; i < int(m_plate_list.size()); ++i) {
+			const Vec2d legacy_position((i % m_plate_cols) * plate_stride_x(), -(i / m_plate_cols) * plate_stride_y());
+			const Vec2d position = plate_data_list[i]->printer_profile_origin.value_or(legacy_position);
+			position_plate(*m_plate_list[i], Vec3d(position.x(), position.y(), 0.), false, false, true);
+			set_plate_shape(*m_plate_list[i], position);
+		}
+		if (plate_data_list.front()->printer_profile_origin) {
+			Vec3d position(plate_stride_x(), 0., 0.);
+			unprintable_plate.set_pos_and_size(position, m_plate_width, m_plate_depth, m_plate_height, false);
+		}
+		if (m_plater) {
+			calc_bounding_boxes();
+			Vec2d position = get_current_shape_position();
+			m_plater->set_bed_position(position);
+		} else {
+			finish_loading_printer_profile_layout();
+		}
+	}
 	print();
 	ret = reload_all_objects();
 	print();
@@ -8648,7 +8936,7 @@ int PartPlateList::load_gcode_files()
 			//BoundingBoxf3   print_volume = m_plate_list[i]->get_bounding_box(false);
 			//print_volume.max(2) = this->m_plate_height;
 			//print_volume.min(2) = -1e10;
-			m_model->update_print_volume_state({m_plate_list[i]->get_shape(), this->m_plate_height, m_plate_list[i]->get_extruder_areas(), m_plate_list[i]->get_extruder_heights() });
+			m_plate_list[i]->update_model_print_volume_state();
 
 			if (!m_plate_list[i]->load_gcode_from_file(m_plate_list[i]->m_gcode_path_from_3mf))
 				ret ++;
