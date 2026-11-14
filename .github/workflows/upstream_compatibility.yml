@@ -2,6 +2,9 @@ name: MPW upstream compatibility check
 
 # Review-only probe. Never pushes, merges, rebases, or rewrites source branches.
 on:
+  push:
+    branches:
+      - integration/upstream-orca
   workflow_dispatch:
   pull_request:
     branches:
