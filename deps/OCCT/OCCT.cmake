@@ -3,7 +3,11 @@
 # share an ABI, so clang-cl builds compile OCCT with cl. The Visual Studio generator picks the
 # compiler by toolset, so there OCCT may stay on clang-cl; keep precompiled headers off there.
 set(_occt_compiler_args "")
-set(_occt_pch ON)
+if (WIN32)
+    set(_occt_pch OFF)
+else ()
+    set(_occt_pch ON)
+endif ()
 if (MSVC AND CMAKE_CXX_COMPILER_ID STREQUAL "Clang")
     if ("${DEPS_ARCH}" STREQUAL "arm64" OR NOT CMAKE_GENERATOR MATCHES "Visual Studio")
         set(_occt_compiler_args -DCMAKE_C_COMPILER:STRING=cl -DCMAKE_CXX_COMPILER:STRING=cl)
