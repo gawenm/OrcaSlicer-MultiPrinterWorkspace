@@ -39,8 +39,7 @@ jobs:
           PUBLISHER: ${{ vars.RELEASE_PUBLISHER }}
         run: |
           if [ -z "$PUBLISHER" ]; then
-            echo "::error::RELEASE_PUBLISHER repo variable is not set."
-            exit 1
+            PUBLISHER="${{ github.repository_owner }}"
           fi
           if [ "${{ github.actor }}" != "$PUBLISHER" ]; then
             echo "::error::Only @$PUBLISHER may run this workflow (you are @${{ github.actor }})."
@@ -79,6 +78,8 @@ jobs:
             -p 'OrcaSlicer_Mac_universal_*' \
             -p 'OrcaSlicer_Linux_ubuntu_*' \
             -p 'OrcaSlicer-Linux-flatpak_*' \
+            -p 'Orca-MPW-Arch-*' \
+            -p 'Orca-MPW-Debian-*' \
             -p 'PDB'
           echo "Downloaded artifact folders:"
           ls -1 artifacts
@@ -103,6 +104,9 @@ jobs:
           find artifacts -type f -name '*.AppImage' -exec cp -v {} upload/ \;
           # Flatpak bundles (x86_64 + aarch64).
           find artifacts -type f -name '*.flatpak' -exec cp -v {} upload/ \;
+          # MPW native Linux installers.
+          find artifacts -type f -name '*.pkg.tar.zst' -exec cp -v {} upload/ \;
+          find artifacts -type f -name '*.deb' -exec cp -v {} upload/ \;
           # Windows debug symbols (PDB archive, for developers).
           find artifacts -type f -name 'Debug_PDB_*.7z' -exec cp -v {} upload/ \;
 
