@@ -518,12 +518,13 @@ jobs:
           # -l compiles with Visual Studio's clang-cl and -x builds with Ninja; --msvc --msbuild is cl under the Visual Studio generator.
           $flags = if ("${{ inputs.compiler }}" -eq "clang") { "-l", "-x" } else { "--msvc", "--msbuild" }
           $buildScript = ".\build_win.bat"
-          # The separate build job must recreate the alias embedded in ARM64 CMake cache files.
-          if ("${{ inputs.arch }}" -eq "arm64" -and -not "${{ vars.SELF_HOSTED }}") {
+          # Recreate the alias embedded in both hosted Windows dependency installations.
+          # Keep it for later packaging steps, which also consume the generated build files.
+          if (-not "${{ vars.SELF_HOSTED }}") {
             $drive = "O:"
             & subst.exe $drive "${{ github.workspace }}"
             if ($LASTEXITCODE -ne 0) { throw "Could not map short build path $drive" }
-            $deps = "${drive}/deps/build-arm64"
+            $deps = ("${drive}/" + (Split-Path "${{ inputs.cache-path }}" -Parent)).Replace('\', '/')
             $buildScript = "${drive}\build_win.bat"
           }
           & $buildScript -s --tests -i --arch ${{ inputs.arch }} --build-dir $env:BUILD_DIR --deps-dir $deps @flags
