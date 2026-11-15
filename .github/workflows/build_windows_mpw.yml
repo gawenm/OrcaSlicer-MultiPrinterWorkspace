@@ -43,7 +43,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        include: ${{ fromJSON(vars.SELF_HOSTED && '[{"arch":"x64","os":"orca-win-server","compiler":"clang"}]' || '[{"arch":"x64","os":"windows-latest","compiler":"clang"},{"arch":"arm64","os":"windows-11-vs2026-arm","compiler":"clang"}]') }}
+        include: ${{ fromJSON(vars.SELF_HOSTED && '[{"arch":"x64","os":"orca-win-server","compiler":"clang"}]' || '[{"arch":"x64","os":"windows-latest","compiler":"clang"}]') }}
     uses: ./.github/workflows/build_check_cache.yml
     with:
       os: ${{ matrix.os }}
@@ -60,13 +60,3 @@ jobs:
     with:
       os: ${{ vars.SELF_HOSTED && 'orca-win-server' || 'windows-latest' }}
       artifact: ${{ github.sha }}-tests-windows-x64
-
-  unit_tests_windows_arm64:
-    name: Windows ARM64 / Unit Tests
-    needs: build_windows
-    if: ${{ !cancelled() && needs.build_windows.result == 'success' && !inputs.build-deps-only && !vars.SELF_HOSTED }}
-    uses: ./.github/workflows/unit_tests.yml
-    with:
-      os: windows-11-vs2026-arm
-      artifact: ${{ github.sha }}-tests-windows-arm64
-      test-dir: build-arm64/tests

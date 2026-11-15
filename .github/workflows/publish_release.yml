@@ -95,11 +95,8 @@ jobs:
           # binaries are already unzipped. Copy the inner binary for each platform.
           # -type f is required (some artifact *folders* are named "*.flatpak").
 
-          # Windows installers (x64 + arm64): the .exe inside each installer
-          # artifact, NOT the orca-slicer.exe in the portable app folder. CPack
-          # now bakes the arch into the filename (…_x64.exe / …_arm64.exe), so
-          # copy them straight through.
-          find artifacts -type f -name '*.exe' -path '*OrcaSlicer_Windows_V*' ! -path '*_portable*' -exec cp -v {} upload/ \;
+          # Windows x64 installers only.
+          find artifacts -type f -name '*_x64.exe' -path '*OrcaSlicer_Windows_V*' ! -path '*_portable*' -exec cp -v {} upload/ \;
           # macOS universal DMG (profile-validator DMG isn't downloaded).
           find artifacts -type f -name '*.dmg' -path '*OrcaSlicer_Mac_universal_*' -exec cp -v {} upload/ \;
           # Linux AppImage.
@@ -109,9 +106,8 @@ jobs:
           # Windows debug symbols (PDB archive, for developers).
           find artifacts -type f -name 'Debug_PDB_*.7z' -exec cp -v {} upload/ \;
 
-          # Portable Windows builds (x64 + arm64) are unzipped folder artifacts;
-          # re-zip each to its released filename (these stay .zip on the release).
-          mapfile -t portable_dirs < <(find artifacts -maxdepth 1 -type d -name 'OrcaSlicer_Windows_*_portable')
+          # Repack Windows x64 portable artifacts only.
+          mapfile -t portable_dirs < <(find artifacts -maxdepth 1 -type d -name 'OrcaSlicer_Windows_*_x64_portable')
           if [ ${#portable_dirs[@]} -eq 0 ]; then
             echo "::warning::Windows portable artifact not found."
           fi
@@ -149,9 +145,7 @@ jobs:
           describe() {
             case "$1" in
               *Windows_Installer_*_x64.exe)   echo "01|Windows installer (x64)" ;;
-              *Windows_Installer_*_arm64.exe) echo "02|Windows installer (ARM64)" ;;
               *_x64_portable.zip)             echo "03|Windows portable (x64)" ;;
-              *_arm64_portable.zip)           echo "04|Windows portable (ARM64)" ;;
               *.dmg)                          echo "05|macOS (Apple Silicon and Intel)" ;;
               *_aarch64_*.AppImage)           echo "07|Linux AppImage (aarch64)" ;;
               *.AppImage)                     echo "06|Linux AppImage (x86_64)" ;;
