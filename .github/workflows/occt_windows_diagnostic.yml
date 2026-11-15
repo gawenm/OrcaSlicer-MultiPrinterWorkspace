@@ -33,23 +33,16 @@ jobs:
           useLocalCache: true
 
       - name: Initialize MSVC x64 compiler environment
+        uses: ilammy/msvc-dev-cmd@v1
+        with:
+          arch: amd64
+
+      - name: Verify MSVC compiler environment
         run: |
           $ErrorActionPreference = 'Stop'
-          $vswhere = Join-Path ${env:ProgramFiles(x86)} 'Microsoft Visual Studio\Installer\vswhere.exe'
-          $vs = & $vswhere -latest -products * -property installationPath
-          if ($LASTEXITCODE -ne 0 -or -not $vs) { throw 'Visual Studio not found' }
-          $vcvars = Join-Path $vs 'VC\Auxiliary\Build\vcvars64.bat'
-          if (-not (Test-Path $vcvars)) { throw "Missing vcvars64.bat: $vcvars" }
-          $lines = & cmd.exe /d /s /c "`"`"$vcvars`" >nul && set`""
-          if ($LASTEXITCODE -ne 0) { throw 'vcvars64.bat failed' }
-          foreach ($line in $lines) {
-            if ($line -match '^([^=]+)=(.*)$') {
-              [Environment]::SetEnvironmentVariable($matches[1], $matches[2], 'Process')
-              "$($matches[1])=$($matches[2])" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
-            }
-          }
           where.exe cl
-          if ($LASTEXITCODE -ne 0) { throw 'cl.exe unavailable after vcvars64' }
+          cl 2>&1 | Select-Object -First 3
+          if ($LASTEXITCODE -ne 0) { throw 'cl.exe unavailable after msvc-dev-cmd' }
 
       - name: Configure real Orca dependency superbuild
         run: |
