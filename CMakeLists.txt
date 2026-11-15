@@ -483,20 +483,32 @@ if ("${CMAKE_PREFIX_PATH}" STREQUAL "" OR REGEN_DESTDIR)
 else ()
     message(STATUS "CMAKE_PREFIX_PATH: ${CMAKE_PREFIX_PATH} (from cache or command line)")
 endif ()
-set(PREFIX_PATH_CHECK ${CMAKE_PREFIX_PATH})
+set(_orca_dependency_prefixes "${CMAKE_PREFIX_PATH}")
 
 # the CMAKE_PREFIX_PATH environment variable is separate from the CMAKE_PREFIX_PATH cache variable and provides additional paths to search for libraries.
 if (NOT "$ENV{CMAKE_PREFIX_PATH}" STREQUAL "")
     message(STATUS "CMAKE_PREFIX_PATH: $ENV{CMAKE_PREFIX_PATH} (from environment)")
-    list(APPEND PREFIX_PATH_CHECK $ENV{CMAKE_PREFIX_PATH})
+    file(TO_CMAKE_PATH "$ENV{CMAKE_PREFIX_PATH}" _orca_env_prefixes)
+    list(APPEND _orca_dependency_prefixes ${_orca_env_prefixes})
 endif ()
 
 # Check all directories in CMAKE_PREFIX_PATH variables
-foreach (DIR ${PREFIX_PATH_CHECK})
+foreach (DIR IN LISTS _orca_dependency_prefixes)
     if (NOT EXISTS "${DIR}")
         message(WARNING "CMAKE_PREFIX_PATH element doesn't exist: ${DIR}")
     endif ()
 endforeach ()
+
+# Packaging needs a single prefix for each bundled dependency it stages.
+function(orcaslicer_find_dependency_prefix relative_path result)
+    foreach(prefix IN LISTS _orca_dependency_prefixes)
+        if(EXISTS "${prefix}/${relative_path}")
+            set(${result} "${prefix}" PARENT_SCOPE)
+            return()
+        endif()
+    endforeach()
+    message(FATAL_ERROR "Missing bundled dependency file ${relative_path} in CMAKE_PREFIX_PATH: ${_orca_dependency_prefixes}")
+endfunction()
 
 if (APPLE)
     set(CMAKE_MACOSX_RPATH ON CACHE BOOL "")
@@ -834,7 +846,7 @@ if (SLIC3R_GUI)
     # the same dependency prefix before loading the LibDataChannel config.
     if (NOT TARGET Usrsctp::usrsctp)
         find_library(_ORCA_USRSCTP_LIBRARY NAMES usrsctp
-            PATHS "${CMAKE_PREFIX_PATH}/lib" NO_DEFAULT_PATH)
+            PATHS ${_orca_dependency_prefixes} PATH_SUFFIXES lib NO_DEFAULT_PATH)
         if (_ORCA_USRSCTP_LIBRARY)
             add_library(Usrsctp::usrsctp UNKNOWN IMPORTED GLOBAL)
             set_target_properties(Usrsctp::usrsctp PROPERTIES
@@ -846,7 +858,7 @@ if (SLIC3R_GUI)
 
     if (NOT TARGET LibJuice::LibJuice)
         find_library(_ORCA_LIBJUICE_LIBRARY NAMES juice
-            PATHS "${CMAKE_PREFIX_PATH}/lib" NO_DEFAULT_PATH)
+            PATHS ${_orca_dependency_prefixes} PATH_SUFFIXES lib NO_DEFAULT_PATH)
         if (_ORCA_LIBJUICE_LIBRARY)
             add_library(LibJuice::LibJuice UNKNOWN IMPORTED GLOBAL)
             set_target_properties(LibJuice::LibJuice PROPERTIES
@@ -968,7 +980,8 @@ find_package(NLopt 1.4 REQUIRED)
 set(_bundled_python_version "3.12.13")
 set(_bundled_python_abi "312")
 string(REGEX REPLACE "^([0-9]+\\.[0-9]+)\\..*$" "\\1" _bundled_python_version_short "${_bundled_python_version}")
-set(_bundled_python_root "${CMAKE_PREFIX_PATH}/libpython")
+orcaslicer_find_dependency_prefix("libpython" _bundled_python_prefix)
+set(_bundled_python_root "${_bundled_python_prefix}/libpython")
 set(Python3_ROOT_DIR "${_bundled_python_root}" CACHE PATH "Root directory for bundled Python" FORCE)
 set(Python3_USE_STATIC_LIBS OFF)
 set(Python3_FIND_STRATEGY LOCATION)
@@ -988,9 +1001,12 @@ if(WIN32)
     set(Python3_EXECUTABLE "${_bundled_python_executable}" CACHE FILEPATH "Bundled Python executable" FORCE)
     set(Python3_INCLUDE_DIR "${_bundled_python_root}/include" CACHE PATH "Bundled Python include directory" FORCE)
     set(Python3_LIBRARY "${_bundled_python_library}" CACHE FILEPATH "Bundled Python embed import library" FORCE)
-elseif(APPLE)
+else()
     set(Python3_FIND_FRAMEWORK NEVER)
 
+    unset(_bundled_python_executable CACHE)
+    unset(_bundled_python_include_dir CACHE)
+    unset(_bundled_python_library CACHE)
     find_program(_bundled_python_executable
         NAMES python${_bundled_python_version_short} python3
         PATHS "${_bundled_python_root}/bin"
@@ -1128,13 +1144,14 @@ function(orcaslicer_copy_dlls target config postfix output_dlls)
             "Rebuild the dependencies (build_release_vs2022.bat deps) with the same "
             "SLIC3R_CAD setting as this project.")
     endif ()
+    orcaslicer_find_dependency_prefix("bin/avformat-61.dll" _ffmpeg_prefix)
     file(COPY ${_occt_dlls}
-            ${CMAKE_PREFIX_PATH}/bin/avformat-61.dll
-            ${CMAKE_PREFIX_PATH}/bin/avcodec-61.dll
-            ${CMAKE_PREFIX_PATH}/bin/swresample-5.dll
-            ${CMAKE_PREFIX_PATH}/bin/swscale-8.dll
-            ${CMAKE_PREFIX_PATH}/bin/avutil-59.dll
-         DESTINATION ${_out_dir})
+            "${_ffmpeg_prefix}/bin/avformat-61.dll"
+            "${_ffmpeg_prefix}/bin/avcodec-61.dll"
+            "${_ffmpeg_prefix}/bin/swresample-5.dll"
+            "${_ffmpeg_prefix}/bin/swscale-8.dll"
+            "${_ffmpeg_prefix}/bin/avutil-59.dll"
+         DESTINATION "${_out_dir}")
 
     set(_dll_list
         ${_out_dir}/libgmp-10.dll
@@ -1165,22 +1182,23 @@ function(orcaslicer_copy_sos target config postfix output_sos)
         set(_out_dir "${CMAKE_CURRENT_BINARY_DIR}")
     endif ()
 
-    file(COPY ${CMAKE_PREFIX_PATH}/lib/libavformat.so
-            ${CMAKE_PREFIX_PATH}/lib/libavformat.so.61
-            ${CMAKE_PREFIX_PATH}/lib/libavformat.so.61.1.100
-            ${CMAKE_PREFIX_PATH}/lib/libavcodec.so
-            ${CMAKE_PREFIX_PATH}/lib/libavcodec.so.61
-            ${CMAKE_PREFIX_PATH}/lib/libavcodec.so.61.3.100
-            ${CMAKE_PREFIX_PATH}/lib/libavutil.so
-            ${CMAKE_PREFIX_PATH}/lib/libavutil.so.59
-            ${CMAKE_PREFIX_PATH}/lib/libavutil.so.59.8.100
-            ${CMAKE_PREFIX_PATH}/lib/libswscale.so
-            ${CMAKE_PREFIX_PATH}/lib/libswscale.so.8
-            ${CMAKE_PREFIX_PATH}/lib/libswscale.so.8.1.100
-            ${CMAKE_PREFIX_PATH}/lib/libswresample.so
-            ${CMAKE_PREFIX_PATH}/lib/libswresample.so.5
-            ${CMAKE_PREFIX_PATH}/lib/libswresample.so.5.1.100
-         DESTINATION ${_out_dir})
+    orcaslicer_find_dependency_prefix("lib/libavformat.so.61.1.100" _ffmpeg_prefix)
+    file(COPY "${_ffmpeg_prefix}/lib/libavformat.so"
+            "${_ffmpeg_prefix}/lib/libavformat.so.61"
+            "${_ffmpeg_prefix}/lib/libavformat.so.61.1.100"
+            "${_ffmpeg_prefix}/lib/libavcodec.so"
+            "${_ffmpeg_prefix}/lib/libavcodec.so.61"
+            "${_ffmpeg_prefix}/lib/libavcodec.so.61.3.100"
+            "${_ffmpeg_prefix}/lib/libavutil.so"
+            "${_ffmpeg_prefix}/lib/libavutil.so.59"
+            "${_ffmpeg_prefix}/lib/libavutil.so.59.8.100"
+            "${_ffmpeg_prefix}/lib/libswscale.so"
+            "${_ffmpeg_prefix}/lib/libswscale.so.8"
+            "${_ffmpeg_prefix}/lib/libswscale.so.8.1.100"
+            "${_ffmpeg_prefix}/lib/libswresample.so"
+            "${_ffmpeg_prefix}/lib/libswresample.so.5"
+            "${_ffmpeg_prefix}/lib/libswresample.so.5.1.100"
+         DESTINATION "${_out_dir}")
 
     set(${output_sos}
         ${_out_dir}/libavformat.so

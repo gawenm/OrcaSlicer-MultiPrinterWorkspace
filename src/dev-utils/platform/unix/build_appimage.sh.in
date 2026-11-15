@@ -1,17 +1,14 @@
 #!/usr/bin/env bash
+set -e
+
 APPIMAGETOOLURL="https://github.com/AppImage/appimagetool/releases/download/continuous/appimagetool-$(uname -m).AppImage"
-SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
-REPO_ROOT="$(cd -- "${SCRIPT_DIR}/../../.." && pwd)"
+REPO_ROOT="@PROJECT_SOURCE_DIR@"
 
 
 APP_IMAGE="@SLIC3R_APP_KEY@_Linux_V@SoftFever_VERSION@.AppImage"
 
-wget ${APPIMAGETOOLURL} -O ../appimagetool.AppImage
+wget "$APPIMAGETOOLURL" -O ../appimagetool.AppImage
 chmod +x ../appimagetool.AppImage
-
-if [ -f /.dockerenv ] ; then # Only run if inside of a Docker Container
-sed '0,/AI\x02/{s|AI\x02|\x00\x00\x00|}' -i  ../appimagetool.AppImage
-fi
 
 mv @SLIC3R_APP_CMD@ AppRun
 chmod +x AppRun
@@ -39,13 +36,5 @@ cp "${REPO_ROOT}/scripts/flatpak/com.orcaslicer.@SLIC3R_APP_KEY@.metainfo.xml" \
   "usr/share/metainfo/com.orcaslicer.@SLIC3R_APP_KEY@.appdata.xml"
 
 
-export ARCH=$(uname -m)
-
-if [ -f /.dockerenv ] ; then # Only run if inside of a Docker Container
-  ../appimagetool.AppImage --appimage-extract-and-run . $([ -n "${container}" ] && echo '--appimage-extract-and-run')
-else
-  ../appimagetool.AppImage . $([ -n "${container}" ] && echo '--appimage-extract-and-run')
-fi
-
-mv @SLIC3R_APP_KEY@-$(uname -m).AppImage ${APP_IMAGE}
-chmod +x ${APP_IMAGE}
+ARCH=$(uname -m) ../appimagetool.AppImage --appimage-extract-and-run . "$APP_IMAGE"
+chmod +x "$APP_IMAGE"

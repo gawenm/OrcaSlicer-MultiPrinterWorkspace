@@ -24,6 +24,9 @@ jobs:
     # graph shows e.g. "Windows x64 / Unit Tests".
     name: Unit Tests
     runs-on: ${{ inputs.os }}
+    concurrency:
+      group: ${{ startsWith(inputs.os, 'orca-') && format('orca-build-directory-{0}', inputs.os) || format('unit-tests-{0}-{1}', github.run_id, inputs.artifact) }}
+      queue: max
     steps:
       - name: Checkout
         uses: actions/checkout@v7
@@ -49,11 +52,9 @@ jobs:
           cmakeVersion: "~4.3.0"  # use most recent 4.3.x version
           useLocalCache: true
           useCloudCache: true
-      # CTest's generated test discovery files embed the O:/ path used by the
-      # Windows ARM64 build job to avoid MSVC filename-length limits.
-      # Each GitHub job gets a fresh VM, so recreate that alias before ctest.
-      - name: Restore Windows ARM64 build path for CTest
-        if: ${{ runner.os == 'Windows' && inputs.test-dir == 'build-arm64/tests' }}
+      # CTest records the O:/ path used by hosted Windows builds. Recreate it on the test runner.
+      - name: Restore hosted Windows build path for CTest
+        if: ${{ runner.os == 'Windows' && !vars.SELF_HOSTED }}
         shell: pwsh
         run: |
           & subst.exe O: "${{ github.workspace }}"

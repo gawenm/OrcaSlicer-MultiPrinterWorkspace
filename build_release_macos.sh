@@ -281,9 +281,8 @@ function relocate_python_runtime() {
 function verify_python_runtime() {
     local app="$1"
     local pydir="$app/Contents/MacOS/python"
-    [ -d "$pydir" ] || return 0  # app doesn't bundle Python (e.g. profile validator)
-    if [ ! -L "$pydir" ]; then
-        echo "ERROR: Contents/MacOS/python must be a symlink into Contents/Resources" >&2
+    if [ ! -L "$pydir" ] || [ ! -d "$pydir" ]; then
+        echo "ERROR: Contents/MacOS/python must link to the bundled Python runtime" >&2
         echo "       (see relocate_python_runtime in this script)" >&2
         exit 1
     fi
@@ -295,8 +294,9 @@ function verify_python_runtime() {
         exit 1
     fi
     echo "  Verifying bundled Python runtime in $(basename "$app")..."
-    local bad
-    bad=$(otool -arch all -L "$pybin" "$app/Contents/MacOS/OrcaSlicer" | grep "libpython" | grep -v "@rpath/" || true)
+    local libraries bad
+    libraries=$(otool -arch all -L "$pybin" "$app/Contents/MacOS/OrcaSlicer")
+    bad=$(printf '%s\n' "$libraries" | grep "libpython" | grep -v "@rpath/" || true)
     if [ -n "$bad" ]; then
         echo "ERROR: a bundled binary references libpython by absolute path (relocation regression):" >&2
         echo "$bad" >&2
@@ -304,7 +304,7 @@ function verify_python_runtime() {
     fi
     # otool -L shows load commands only; assert the consumer rpath separately.
     # Its loss is masked on the build host by CMake's absolute build-tree rpath.
-    if ! otool -arch all -l "$app/Contents/MacOS/OrcaSlicer" | grep -q "path @executable_path/python/lib "; then
+    if ! otool -arch all -l "$app/Contents/MacOS/OrcaSlicer" | grep "path @executable_path/python/lib " >/dev/null; then
         echo "ERROR: OrcaSlicer lacks the @executable_path/python/lib rpath (relocation regression)" >&2
         exit 1
     fi
@@ -327,6 +327,12 @@ function build_slicer() {
 
             echo "Building slicer for $_ARCH..."
             (
+                # The bundled libpng has prefixed symbols. Keep its headers and
+                # archive together even when another libpng is installed on the host.
+                png_args=()
+                if [ -f "$DEPS/usr/local/include/png.h" ] && [ -f "$DEPS/usr/local/lib/libpng.a" ]; then
+                    png_args=(-DPNG_PNG_INCLUDE_DIR:PATH="$DEPS/usr/local/include" -DPNG_LIBRARY:FILEPATH="$DEPS/usr/local/lib/libpng.a")
+                fi
                 set -x
             mkdir -p "$PROJECT_BUILD_DIR"
             cd "$PROJECT_BUILD_DIR"
@@ -340,6 +346,7 @@ function build_slicer() {
                     -DCMAKE_OSX_ARCHITECTURES="${_ARCH}" \
                     -DCMAKE_OSX_DEPLOYMENT_TARGET="${OSX_DEPLOYMENT_TARGET}" \
                     -DCMAKE_IGNORE_PREFIX_PATH="${CMAKE_IGNORE_PREFIX_PATH}" \
+                    "${png_args[@]}" \
                     "${CMAKE_CCACHE_ARGS[@]}" \
                     ${CMAKE_POLICY_COMPAT} \
                     "${EXTRA_CMAKE_ARGS[@]}"
@@ -385,7 +392,6 @@ function build_slicer() {
                 cp -pR "../src$BUILD_DIR_CONFIG_SUBDIR/OrcaSlicer_profile_validator.app" ./OrcaSlicer_profile_validator.app
                 # delete .DS_Store file
                 find ./OrcaSlicer_profile_validator.app/ -name '.DS_Store' -delete
-                verify_python_runtime ./OrcaSlicer_profile_validator.app
             fi
         )
 
@@ -412,13 +418,14 @@ function lipo_dir() {
     while IFS= read -r -d '' f; do
         local rel="${f#"$universal_dir"/}"
         local x86="$x86_64_dir/$rel"
-        if [ -f "$x86" ]; then
-            echo "  lipo: $rel"
-            lipo -create "$f" "$x86" -output "$f.tmp"
-            mv "$f.tmp" "$f"
-        else
-            echo "  warning: no x86_64 counterpart for $rel, keeping arm64 only"
+        if [ ! -f "$x86" ]; then
+            echo "ERROR: missing x86_64 binary for $rel" >&2
+            exit 1
         fi
+        echo "  lipo: $rel"
+        lipo -create "$f" "$x86" -output "$f.tmp"
+        lipo "$f.tmp" -verify_arch arm64 x86_64
+        mv "$f.tmp" "$f"
     done < <(find "$universal_dir" -type f -print0 | while IFS= read -r -d '' candidate; do
         if file "$candidate" | grep -q "Mach-O"; then
             printf '%s\0' "$candidate"

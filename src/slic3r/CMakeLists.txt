@@ -1021,31 +1021,35 @@ elseif (MSVC)
     target_compile_options(libslic3r_gui PRIVATE "/FIslic3r/win_platform.hpp")
 endif ()
 
+if (APPLE OR WIN32)
+    orcaslicer_find_dependency_prefix("include/libavformat/avformat.h" _ffmpeg_prefix)
+endif ()
+
 if (APPLE)
     # Static FFmpeg from the deps install: nothing to bundle into the .app,
     # no rpath/install_name handling. Order matters: avformat -> avcodec -> swscale -> avutil.
-    find_library(LIBAVFORMAT_LIBRARY NAMES libavformat.a PATHS ${CMAKE_PREFIX_PATH}/lib NO_DEFAULT_PATH)
-    find_library(LIBAVCODEC_LIBRARY NAMES libavcodec.a PATHS ${CMAKE_PREFIX_PATH}/lib NO_DEFAULT_PATH)
-    find_library(LIBSWSCALE_LIBRARY NAMES libswscale.a PATHS ${CMAKE_PREFIX_PATH}/lib NO_DEFAULT_PATH)
-    find_library(LIBAVUTIL_LIBRARY NAMES libavutil.a PATHS ${CMAKE_PREFIX_PATH}/lib NO_DEFAULT_PATH)
+    find_library(LIBAVFORMAT_LIBRARY NAMES libavformat.a PATHS "${_ffmpeg_prefix}/lib" NO_DEFAULT_PATH)
+    find_library(LIBAVCODEC_LIBRARY NAMES libavcodec.a PATHS "${_ffmpeg_prefix}/lib" NO_DEFAULT_PATH)
+    find_library(LIBSWSCALE_LIBRARY NAMES libswscale.a PATHS "${_ffmpeg_prefix}/lib" NO_DEFAULT_PATH)
+    find_library(LIBAVUTIL_LIBRARY NAMES libavutil.a PATHS "${_ffmpeg_prefix}/lib" NO_DEFAULT_PATH)
     if (NOT LIBAVFORMAT_LIBRARY OR NOT LIBAVCODEC_LIBRARY OR NOT LIBSWSCALE_LIBRARY OR NOT LIBAVUTIL_LIBRARY)
-        message(FATAL_ERROR "Static FFmpeg (libavformat.a/libavcodec.a/libswscale.a/libavutil.a) not found under ${CMAKE_PREFIX_PATH}/lib. Rebuild the deps — FFMPEG builds static-only on macOS.")
+        message(FATAL_ERROR "Static FFmpeg (libavformat.a/libavcodec.a/libswscale.a/libavutil.a) not found under ${_ffmpeg_prefix}/lib. Rebuild the deps — FFMPEG builds static-only on macOS.")
     endif ()
     target_link_libraries(libslic3r_gui ${LIBAVFORMAT_LIBRARY} ${LIBAVCODEC_LIBRARY} ${LIBSWSCALE_LIBRARY} ${LIBAVUTIL_LIBRARY})
-    target_include_directories(libslic3r_gui SYSTEM PRIVATE ${CMAKE_PREFIX_PATH}/include)
+    target_include_directories(libslic3r_gui SYSTEM PRIVATE "${_ffmpeg_prefix}/include")
 elseif (WIN32)
     # Prebuilt shared FFmpeg from the deps install. Windows has no pkg-config,
     # so resolve the import libraries out of the deps prefix directly; the DLLs
     # are copied next to the executable by the top level CMakeLists.
-    find_library(LIBAVFORMAT_LIBRARY NAMES avformat PATHS ${CMAKE_PREFIX_PATH}/lib NO_DEFAULT_PATH)
-    find_library(LIBAVCODEC_LIBRARY NAMES avcodec PATHS ${CMAKE_PREFIX_PATH}/lib NO_DEFAULT_PATH)
-    find_library(LIBSWSCALE_LIBRARY NAMES swscale PATHS ${CMAKE_PREFIX_PATH}/lib NO_DEFAULT_PATH)
-    find_library(LIBAVUTIL_LIBRARY NAMES avutil PATHS ${CMAKE_PREFIX_PATH}/lib NO_DEFAULT_PATH)
+    find_library(LIBAVFORMAT_LIBRARY NAMES avformat PATHS "${_ffmpeg_prefix}/lib" NO_DEFAULT_PATH)
+    find_library(LIBAVCODEC_LIBRARY NAMES avcodec PATHS "${_ffmpeg_prefix}/lib" NO_DEFAULT_PATH)
+    find_library(LIBSWSCALE_LIBRARY NAMES swscale PATHS "${_ffmpeg_prefix}/lib" NO_DEFAULT_PATH)
+    find_library(LIBAVUTIL_LIBRARY NAMES avutil PATHS "${_ffmpeg_prefix}/lib" NO_DEFAULT_PATH)
     if (NOT LIBAVFORMAT_LIBRARY OR NOT LIBAVCODEC_LIBRARY OR NOT LIBSWSCALE_LIBRARY OR NOT LIBAVUTIL_LIBRARY)
-        message(FATAL_ERROR "FFmpeg (avformat/avcodec/swscale/avutil) not found under ${CMAKE_PREFIX_PATH}/lib. Rebuild the deps.")
+        message(FATAL_ERROR "FFmpeg (avformat/avcodec/swscale/avutil) not found under ${_ffmpeg_prefix}/lib. Rebuild the deps.")
     endif ()
     target_link_libraries(libslic3r_gui ${LIBAVFORMAT_LIBRARY} ${LIBAVCODEC_LIBRARY} ${LIBSWSCALE_LIBRARY} ${LIBAVUTIL_LIBRARY})
-    target_include_directories(libslic3r_gui SYSTEM PRIVATE ${CMAKE_PREFIX_PATH}/include)
+    target_include_directories(libslic3r_gui SYSTEM PRIVATE "${_ffmpeg_prefix}/include")
 else ()
     pkg_check_modules(LIBAV REQUIRED IMPORTED_TARGET
         libavformat

@@ -7,7 +7,7 @@
 #include <memory>
 
 #include <cstdio>
-#include <png.h>
+#include ORCA_PNG_HEADER
 
 #include <boost/format.hpp>
 #include <boost/log/trivial.hpp>

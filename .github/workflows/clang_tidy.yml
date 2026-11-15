@@ -59,10 +59,10 @@ jobs:
           else
             echo "No C++ changes under src/ or tests/."
           fi
-          if ! git diff --quiet HEAD^1 -- deps; then
+          if ! git diff --quiet HEAD^1 -- deps .github/actions/build-deps/action.yml .github/actions/apt-install-deps/action.yml build_linux.sh; then
             echo "deps=true" >> "$GITHUB_OUTPUT"
           fi
-          echo "deps-key=linux-clang-cache-orcaslicer_deps-build-${{ hashFiles('deps/**') }}" >> "$GITHUB_OUTPUT"
+          echo "deps-key=orca-deps-v2-${{ vars.SELF_HOSTED && 'orca-lnx-server' || 'ubuntu-24.04' }}-x86_64-msvc-${{ hashFiles('deps/**', '.github/actions/build-deps/action.yml', '.github/actions/apt-install-deps/action.yml', 'build_linux.sh') }}" >> "$GITHUB_OUTPUT"
 
       # Parsing needs the dependency headers, not a build of this PR's deps/.
       # Without an exact match the job waits for the build that saves it: this
@@ -121,7 +121,7 @@ jobs:
         with:
           path: ${{ github.workspace }}/deps/build/OrcaSlicer_dep
           key: ${{ steps.changes.outputs.deps-key }}
-          restore-keys: linux-clang-cache-orcaslicer_deps-build-
+          restore-keys: orca-deps-v2-${{ vars.SELF_HOSTED && 'orca-lnx-server' || 'ubuntu-24.04' }}-x86_64-msvc-
           fail-on-cache-miss: true
 
       - name: Warn about older deps
