@@ -4,7 +4,7 @@ diff --git a/src/ModelingData/TKBRep/BRepGraph/BRepGraph_LayerTopoSupplement.cxx
 @@ -27,6 +27,13 @@ namespace
  {
  const TCollection_AsciiString THE_SUPPLEMENT_LAYER_NAME("LayerTopoSupplement");
-
+ 
 +// MSVC 14.52 ARM64 crashes in its optimizer on this switch (C1001, Utc/main.cpp).
 +// Keep the workaround local to this predicate; the rest of OCCT stays optimized.
 +// Recheck with a fixed MSVC toolset before removing it.
@@ -18,7 +18,7 @@ diff --git a/src/ModelingData/TKBRep/BRepGraph/BRepGraph_LayerTopoSupplement.cxx
 @@ -48,6 +55,10 @@ bool isSupportedOwnerKind(const BRepGraph_NodeId::Kind theKind)
    return false;
  }
-
+ 
 +#if defined(_MSC_VER) && defined(_M_ARM64) && !defined(__clang__)
 +  #pragma optimize("", on)
 +#endif

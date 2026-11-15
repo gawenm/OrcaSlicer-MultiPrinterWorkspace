@@ -25,6 +25,24 @@ endif()
 # shipped bytes. Windows ships only the DLLs libslic3r links, so the tab adds the TKFillet,
 # TKOffset and TKBool DLLs. See docs/HLSD/design-tab.md.
 
+# Keep the upstream source correction cross-platform, but apply the
+# MSVC-specific workaround only to Windows ARM64.
+set(_occt_patches
+    ${CMAKE_CURRENT_LIST_DIR}/0001-BRepMesh-seam-pcurve-at-edge-parameter.patch
+)
+if(WIN32 AND "${DEPS_ARCH}" STREQUAL "arm64")
+    list(APPEND _occt_patches
+        ${CMAKE_CURRENT_LIST_DIR}/0002-msvc-arm64-owner-kind-optimizer.patch
+    )
+endif()
+
+# OCCT PCH paths can exceed MSVC generated-file limits with long filenames.
+# Keep the non-Windows dependency builds unchanged.
+set(_occt_windows_pch_args "")
+if(WIN32)
+    set(_occt_windows_pch_args -DBUILD_USE_PCH=OFF)
+endif()
+
 if (IN_GIT_REPO)
     set(OCCT_DIRECTORY_FLAG --directory ${BINARY_DIR_REL}/dep_OCCT-prefix/src/dep_OCCT)
 endif ()
@@ -32,11 +50,10 @@ endif ()
 orcaslicer_add_cmake_project(OCCT
     URL https://github.com/Open-Cascade-SAS/OCCT/archive/refs/tags/V8_0_1.zip
     URL_HASH SHA256=7c033d917ee8f040c0512d289dcc5f02c148889d5bac17c3e25639accb44f0da
-    # Fix BRepMesh seam triangulation (Open-Cascade-SAS/OCCT#572) and work around
-    # the MSVC ARM64 optimizer crash in BRepGraph_LayerTopoSupplement.
-    PATCH_COMMAND git apply ${OCCT_DIRECTORY_FLAG} --verbose --ignore-space-change --whitespace=fix
-        ${CMAKE_CURRENT_LIST_DIR}/0001-BRepMesh-seam-pcurve-at-edge-parameter.patch
-        ${CMAKE_CURRENT_LIST_DIR}/0002-msvc-arm64-owner-kind-optimizer.patch
+    # General seam-edge correction on every platform, ARM64 workaround only
+    # on Windows ARM64. Preflight verifies both patches against pinned V8_0_1.
+    PATCH_COMMAND git apply ${OCCT_DIRECTORY_FLAG} --whitespace=error
+        ${_occt_patches}
     #DEPENDS dep_Boost
     CMAKE_ARGS
         -DCMAKE_CXX_STANDARD=17
@@ -62,4 +79,5 @@ orcaslicer_add_cmake_project(OCCT
         -DBUILD_MODULE_ModelingData=OFF
         -DBUILD_MODULE_Visualization=OFF
         ${_occt_compiler_args}
+        ${_occt_windows_pch_args}
 )

@@ -14,6 +14,19 @@ inputs:
 runs:
   using: composite
   steps:
+    - name: Verify pinned OCCT patches before Windows dependencies
+      if: runner.os == 'Windows'
+      shell: pwsh
+      run: |
+        if (Get-Command python -ErrorAction SilentlyContinue) {
+          & python scripts/ci_verify_occt_patches.py
+        } elseif (Get-Command py -ErrorAction SilentlyContinue) {
+          & py -3 scripts/ci_verify_occt_patches.py
+        } else {
+          throw "Python 3 is required to verify the pinned OCCT patches."
+        }
+        if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
     - name: setup dev on Windows
       if: runner.os == 'Windows'
       uses: microsoft/setup-msbuild@v3
