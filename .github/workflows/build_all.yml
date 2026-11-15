@@ -309,3 +309,5 @@ jobs:
     if: ${{ !cancelled() && !vars.SELF_HOSTED && github.event_name != 'pull_request' && (github.event_name != 'schedule' || github.repository == 'OrcaSlicer/OrcaSlicer') }}
     uses: ./.github/workflows/build_flatpak.yml
     secrets: inherit
+
+# MPW full upstream build matrix validation trigger (2026-11-15)
