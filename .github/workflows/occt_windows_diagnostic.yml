@@ -44,6 +44,15 @@ jobs:
           cl 2>&1 | Select-Object -First 3
           if ($LASTEXITCODE -ne 0) { throw 'cl.exe unavailable after msvc-dev-cmd' }
 
+      - name: Map short OCCT workspace path
+        run: |
+          $ErrorActionPreference = 'Stop'
+          if (Test-Path 'O:\') { throw 'O: is already in use; choose another drive' }
+          subst.exe O: "$env:GITHUB_WORKSPACE"
+          if ($LASTEXITCODE -ne 0) { throw 'Cannot map O: workspace alias' }
+          if (-not (Test-Path 'O:\deps\CMakeLists.txt')) { throw 'Mapped workspace does not contain dependencies' }
+          Write-Host 'OCCT dependency build will use O:\deps\build'
+
       - name: Configure real Orca dependency superbuild
         run: |
           $ErrorActionPreference = 'Stop'
@@ -52,25 +61,25 @@ jobs:
           $clang = Join-Path $vs 'VC\Tools\Llvm\x64\bin\clang-cl.exe'
           if (-not (Test-Path $clang)) { throw "Visual Studio clang-cl not found: $clang" }
           Write-Host "Superbuild compiler: $clang"
-          cmake -S deps -B deps/build -G "Ninja Multi-Config" `
+          cmake -S O:/deps -B O:/deps/build -G "Ninja Multi-Config" `
             "-DCMAKE_C_COMPILER=$clang" "-DCMAKE_CXX_COMPILER=$clang" `
             -DCMAKE_BUILD_TYPE=Release -DSLIC3R_CAD=ON
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-          Select-String -Path deps/build/CMakeCache.txt -Pattern 'CMAKE_CXX_COMPILER:|CMAKE_GENERATOR:|SLIC3R_CAD:' | ForEach-Object { $_.Line }
+          Select-String -Path O:/deps/build/CMakeCache.txt -Pattern 'CMAKE_CXX_COMPILER:|CMAKE_GENERATOR:|SLIC3R_CAD:' | ForEach-Object { $_.Line }
 
       - name: Build only production dep_OCCT
         env:
           CMAKE_BUILD_PARALLEL_LEVEL: ${{ inputs.parallel }}
         run: |
           $ErrorActionPreference = 'Stop'
-          cmake --build deps/build --config Release --target dep_OCCT --verbose 2>&1 |
+          cmake --build O:/deps/build --config Release --target dep_OCCT --verbose 2>&1 |
             Tee-Object -FilePath "$env:RUNNER_TEMP/occt-production.log"
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
       - name: Report actual OCCT compiler and PCH
         if: always()
         run: |
-          $cache = 'deps/build/dep_OCCT-prefix/src/dep_OCCT-build/CMakeCache.txt'
+          $cache = 'O:/deps/build/dep_OCCT-prefix/src/dep_OCCT-build/CMakeCache.txt'
           if (Test-Path $cache) {
             Select-String -Path $cache -Pattern 'BUILD_USE_PCH|CMAKE_CXX_COMPILER:|CMAKE_GENERATOR:' |
               ForEach-Object { $_.Line }
