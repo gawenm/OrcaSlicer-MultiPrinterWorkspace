@@ -17,6 +17,9 @@ on:
           required: false
           type: string
           default: msvc
+        force-build:
+          type: boolean
+          default: false
         macos-combine-only:
           required: false
           type: boolean
@@ -26,6 +29,9 @@ jobs:
   build_orca:
     name: Build OrcaSlicer
     runs-on: ${{ inputs.os }}
+    concurrency:
+      group: ${{ startsWith(inputs.os, 'orca-') && format('orca-build-directory-{0}', inputs.os) || format('build-orca-{0}-{1}-{2}', github.run_id, inputs.os, inputs.arch) }}
+      queue: max
     env:
       date:
       ver:
@@ -44,19 +50,64 @@ jobs:
         with:
           lfs: 'false'
 
-      - name: load cached deps
-        if: ${{ !(runner.os == 'macOS' && inputs.macos-combine-only) }}
-        uses: actions/cache@v6
+      - name: Restore installed dependencies
+        id: deps_restore
+        if: ${{ !inputs.macos-combine-only && !inputs.force-build }}
+        uses: actions/cache/restore@v6
+        continue-on-error: true
         with:
           path: ${{ github.workspace }}/${{ inputs.cache-path }}
           key: ${{ inputs.cache-key }}
-          fail-on-cache-miss: true
+
+      - name: Check dependency install
+        id: deps_install
+        if: ${{ !inputs.macos-combine-only }}
+        shell: bash
+        env:
+          DEPS_PATH: ${{ inputs.cache-path }}
+          CACHE_KEY: ${{ inputs.cache-key }}
+          CACHE_HIT: ${{ steps.deps_restore.outputs.cache-hit }}
+        run: |
+          test -n "$DEPS_PATH"
+          if [[ "$CACHE_HIT" == true && -d "$DEPS_PATH/usr/local" ]]; then
+            echo "hit=true" >> "$GITHUB_OUTPUT"
+            printf 'Dependency cache hit for `%s`.\n' "$CACHE_KEY" >> "$GITHUB_STEP_SUMMARY"
+          else
+            rm -rf -- "$DEPS_PATH"
+            printf 'Building dependencies for `%s`.\n' "$CACHE_KEY" >> "$GITHUB_STEP_SUMMARY"
+          fi
 
       - uses: lukka/get-cmake@latest
         with:
           cmakeVersion: "~4.3.0"  # use most recent 4.3.x version
           useLocalCache: true         # <--= Use the local cache (default is 'false').
           useCloudCache: true
+
+      - name: Build dependencies
+        id: build_deps
+        if: ${{ !inputs.macos-combine-only && steps.deps_install.outputs.hit != 'true' }}
+        uses: ./.github/actions/build-deps
+        with:
+          self-hosted: ${{ vars.SELF_HOSTED && 'true' || 'false' }}
+          arch: ${{ inputs.arch }}
+          compiler: ${{ inputs.compiler }}
+          cache-path: ${{ inputs.cache-path }}
+
+      - name: Save installed dependencies
+        if: ${{ steps.build_deps.outcome == 'success' }}
+        uses: actions/cache/save@v6
+        continue-on-error: true
+        with:
+          path: ${{ github.workspace }}/${{ inputs.cache-path }}
+          key: ${{ inputs.cache-key }}
+
+      - name: Free space after building dependencies
+        if: ${{ steps.build_deps.outcome == 'success' }}
+        shell: bash
+        env:
+          DEPS_PATH: ${{ inputs.cache-path }}
+        run: |
+          find "${DEPS_PATH%/*}" -mindepth 1 -maxdepth 1 ! -name "${DEPS_PATH##*/}" -exec rm -rf {} +
 
       # Compiler cache. Pushes save it, so main keeps it warm; pull requests
       # restore it and discard what they compiled. Objects are keyed on the
@@ -231,6 +282,8 @@ jobs:
         with:
           name: OrcaSlicer_Mac_bundle_${{ inputs.arch }}_${{ github.sha }}
           path: ${{ github.workspace }}/OrcaSlicer_Mac_bundle_${{ inputs.arch }}_${{ github.sha }}.tar.gz
+          overwrite: true
+          if-no-files-found: error
 
       - name: Download macOS app bundles
         if: runner.os == 'macOS' && inputs.macos-combine-only
@@ -357,7 +410,7 @@ jobs:
           fi
 
       - name: Create DMG without notary
-        if: github.ref != 'refs/heads/main' && runner.os == 'macOS' && inputs.macos-combine-only
+        if: runner.os == 'macOS' && inputs.macos-combine-only && !(github.repository == 'OrcaSlicer/OrcaSlicer' && (github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/heads/release/')))
         working-directory: ${{ github.workspace }}
         run: |
           # Load the `retry` and `create_dmg` helpers.
@@ -378,22 +431,13 @@ jobs:
             create_dmg "OrcaSlicer Profile Validator" ${{ github.workspace }}/build/universal/OrcaSlicer_profile_validator_dmg OrcaSlicer_profile_validator_Mac_universal_${{ env.ver }}.dmg
           fi
 
-      # Delete the per-arch bundles only after signing/DMG creation succeeded, so a
-      # failed run keeps them available for a re-run instead of forcing a full rebuild.
-      - name: Delete intermediate per-arch artifacts
-        if: success() && runner.os == 'macOS' && inputs.macos-combine-only
-        uses: geekyeggo/delete-artifact@v6
-        with:
-          name: |
-            OrcaSlicer_Mac_bundle_arm64_${{ github.sha }}
-            OrcaSlicer_Mac_bundle_x86_64_${{ github.sha }}
-
       - name: Upload artifacts mac
         if: runner.os == 'macOS' && inputs.macos-combine-only
         uses: actions/upload-artifact@v7
         with:
           name: OrcaSlicer_Mac_universal_${{ env.ver }}
           path: ${{ github.workspace }}/OrcaSlicer_Mac_universal_${{ env.ver }}.dmg
+          overwrite: true
           if-no-files-found: error
 
       - name: Upload OrcaSlicer_profile_validator DMG mac
@@ -402,6 +446,7 @@ jobs:
         with:
           name: OrcaSlicer_profile_validator_Mac_universal_DMG_${{ env.ver }}
           path: ${{ github.workspace }}/OrcaSlicer_profile_validator_Mac_universal_${{ env.ver }}.dmg
+          overwrite: true
           if-no-files-found: ignore
 
       - name: Deploy Mac release
@@ -418,6 +463,16 @@ jobs:
         with:
           asset_path: ${{ github.workspace }}/OrcaSlicer_profile_validator_Mac_universal_${{ env.ver }}.dmg
           asset_name: OrcaSlicer_profile_validator_Mac_universal_nightly.dmg
+
+      # Keep the inputs available for retries until the DMG uploads succeed.
+      - name: Delete intermediate per-arch artifacts
+        if: success() && runner.os == 'macOS' && inputs.macos-combine-only
+        continue-on-error: true
+        uses: geekyeggo/delete-artifact@v6
+        with:
+          name: |
+            OrcaSlicer_Mac_bundle_arm64_${{ github.sha }}
+            OrcaSlicer_Mac_bundle_x86_64_${{ github.sha }}
 
 # Windows
       - name: Set Windows build variables
@@ -518,12 +573,13 @@ jobs:
           # -l compiles with Visual Studio's clang-cl and -x builds with Ninja; --msvc --msbuild is cl under the Visual Studio generator.
           $flags = if ("${{ inputs.compiler }}" -eq "clang") { "-l", "-x" } else { "--msvc", "--msbuild" }
           $buildScript = ".\build_win.bat"
-          # The separate build job must recreate the alias embedded in ARM64 CMake cache files.
-          if ("${{ inputs.arch }}" -eq "arm64" -and -not "${{ vars.SELF_HOSTED }}") {
+          # Recreate the alias embedded in both hosted Windows dependency installations.
+          # Keep it for later packaging steps, which also consume the generated build files.
+          if (-not "${{ vars.SELF_HOSTED }}") {
             $drive = "O:"
             & subst.exe $drive "${{ github.workspace }}"
             if ($LASTEXITCODE -ne 0) { throw "Could not map short build path $drive" }
-            $deps = "${drive}/deps/build-arm64"
+            $deps = ("${drive}/" + (Split-Path "${{ inputs.cache-path }}" -Parent)).Replace('\', '/')
             $buildScript = "${drive}\build_win.bat"
           }
           & $buildScript -s --tests -i --arch ${{ inputs.arch }} --build-dir $env:BUILD_DIR --deps-dir $deps @flags
@@ -729,7 +785,7 @@ jobs:
 
 # Ubuntu
       - name: Apt-Install Dependencies
-        if: runner.os == 'Linux' && !vars.SELF_HOSTED
+        if: runner.os == 'Linux' && !vars.SELF_HOSTED && steps.build_deps.outcome != 'success'
         uses: ./.github/actions/apt-install-deps
 
         # Tests must built at the same time as the slicer;
@@ -913,3 +969,28 @@ jobs:
                 '.[] | select((.key | ltrimstr($prefix) | split("-")[0] | tonumber?) < $run) | .id' \
             | tr -d '\r' \
             | while read -r id; do gh cache delete "$id"; done
+
+      - name: Summarize build failure
+        if: failure()
+        shell: bash
+        env:
+          TARGET: ${{ inputs.os }}/${{ inputs.arch || runner.arch }}
+          DEPS_RESULT: ${{ steps.build_deps.outcome }}
+        run: |
+          if [[ "$DEPS_RESULT" == failure ]]; then
+            printf 'Dependency build failed for %s. See the Build dependencies step.\n' "$TARGET"
+          else
+            printf 'Build or packaging failed for %s. See the first failing step.\n' "$TARGET"
+          fi >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Upload failed build diagnostics
+        if: failure()
+        uses: actions/upload-artifact@v7
+        with:
+          name: build-logs-${{ inputs.os }}-${{ inputs.arch || 'x86_64' }}
+          path: |
+            deps/**/CMakeConfigureLog.yaml
+            build*/**/CMakeConfigureLog.yaml
+          if-no-files-found: ignore
+          retention-days: 5
+          overwrite: true

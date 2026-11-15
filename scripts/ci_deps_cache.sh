@@ -18,10 +18,10 @@ workflow=${WORKFLOW_REF:-}
 workflow=${workflow%%@*}
 workflow=${WORKFLOW:-${workflow##*/}}
 
-# Must match the job names in build_all.yml, build_check_cache.yml and build_deps.yml.
+# Must match the job names in build_all.yml, build_check_cache.yml and build_orca.yml.
 job=${JOB:-build_macos_arch (${ARCH:-})}
 check_job_name="$job / Check Cache"
-deps_job_name="$job / Build Deps / Build Deps"
+deps_job_name="$job / Build / Build OrcaSlicer"
 
 out() { echo "$1" >> "${GITHUB_OUTPUT:-/dev/stdout}"; }
 

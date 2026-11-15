@@ -1,7 +1,5 @@
 name: Build Linux
 
-# Manually run this one platform without starting Build all.
-# GitHub Actions -> Run workflow -> choose review/orca-mpw-v2.5.0.
 on:
   workflow_dispatch:
     inputs:
@@ -20,23 +18,29 @@ permissions:
   checks: write
 
 jobs:
-  build_linux:
-    name: Build Linux ${{ matrix.arch == 'aarch64' && 'ARM64' || 'x86_64' }}
-    strategy:
-      fail-fast: false
-      matrix:
-        include: ${{ fromJSON(vars.SELF_HOSTED && '[{"arch":"","os":"orca-lnx-server"}]' || '[{"arch":"","os":"ubuntu-24.04"},{"arch":"aarch64","os":"ubuntu-24.04-arm"}]') }}
+  build_linux_x86_64:
+    name: Build Linux x86_64
     uses: ./.github/workflows/build_check_cache.yml
     with:
-      os: ${{ matrix.os }}
-      arch: ${{ matrix.arch }}
+      os: ${{ vars.SELF_HOSTED && 'orca-lnx-server' || 'ubuntu-24.04' }}
+      arch: ''
+      build-deps-only: ${{ inputs.build-deps-only }}
+    secrets: inherit
+
+  build_linux_aarch64:
+    name: Build Linux aarch64
+    if: ${{ !vars.SELF_HOSTED }}
+    uses: ./.github/workflows/build_check_cache.yml
+    with:
+      os: ${{ 'ubuntu-24.04-arm' }}
+      arch: aarch64
       build-deps-only: ${{ inputs.build-deps-only }}
     secrets: inherit
 
   unit_tests_linux_x86_64:
     name: Linux x86_64 / Unit Tests
-    needs: build_linux
-    if: ${{ !cancelled() && needs.build_linux.result == 'success' && !inputs.build-deps-only }}
+    needs: build_linux_x86_64
+    if: ${{ !cancelled() && success() && !inputs.build-deps-only }}
     uses: ./.github/workflows/unit_tests.yml
     with:
       os: ${{ vars.SELF_HOSTED && 'orca-lnx-server' || 'ubuntu-24.04' }}
@@ -44,8 +48,8 @@ jobs:
 
   unit_tests_linux_aarch64:
     name: Linux ARM64 / Unit Tests
-    needs: build_linux
-    if: ${{ !cancelled() && needs.build_linux.result == 'success' && !inputs.build-deps-only && !vars.SELF_HOSTED }}
+    needs: build_linux_aarch64
+    if: ${{ !cancelled() && success() && !inputs.build-deps-only && !vars.SELF_HOSTED }}
     uses: ./.github/workflows/unit_tests.yml
     with:
       os: ubuntu-24.04-arm
@@ -53,8 +57,8 @@ jobs:
 
   slice_check_linux:
     name: Linux / Profile slice regression
-    needs: build_linux
-    if: ${{ !cancelled() && needs.build_linux.result == 'success' && !inputs.build-deps-only }}
+    needs: [build_linux_x86_64, build_linux_aarch64]
+    if: ${{ !cancelled() && ((vars.SELF_HOSTED && needs.build_linux_x86_64.result == 'success') || needs.build_linux_aarch64.result == 'success') && !inputs.build-deps-only }}
     runs-on: ${{ vars.SELF_HOSTED && 'orca-lnx-server' || 'ubuntu-24.04-arm' }}
     steps:
       - uses: actions/checkout@v7
@@ -72,8 +76,8 @@ jobs:
 
   package_mpw_linux:
     name: Package Arch + Debian x86_64
-    needs: build_linux
-    if: ${{ !cancelled() && needs.build_linux.result == 'success' && !inputs.build-deps-only }}
+    needs: build_linux_x86_64
+    if: ${{ !cancelled() && success() && !inputs.build-deps-only }}
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v7

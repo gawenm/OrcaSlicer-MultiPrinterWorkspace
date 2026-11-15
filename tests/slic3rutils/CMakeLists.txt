@@ -2,6 +2,7 @@ get_filename_component(_TEST_NAME ${CMAKE_CURRENT_LIST_DIR} NAME)
 add_executable(${_TEST_NAME}_tests
     ${_TEST_NAME}_tests_main.cpp
     test_bambu_filament_ids.cpp
+    test_bbl_cert_dir.cpp
     test_bed_exclusion_fields.cpp
     test_cloud_delete_queue.cpp
     test_config_value_formatter.cpp
@@ -85,11 +86,11 @@ orcaslicer_copy_test_dlls(${_TEST_NAME}_tests)
 if (WIN32)
     add_custom_command(TARGET ${_TEST_NAME}_tests POST_BUILD
         COMMAND ${CMAKE_COMMAND} -E make_directory "$<TARGET_FILE_DIR:${_TEST_NAME}_tests>/python"
-        COMMAND ${CMAKE_COMMAND} -E copy_directory "${CMAKE_PREFIX_PATH}/libpython" "$<TARGET_FILE_DIR:${_TEST_NAME}_tests>/python"
+        COMMAND ${CMAKE_COMMAND} -E copy_directory "${_bundled_python_root}" "$<TARGET_FILE_DIR:${_TEST_NAME}_tests>/python"
         COMMAND ${CMAKE_COMMAND} -E copy_if_different
-            "${CMAKE_PREFIX_PATH}/libpython/python${_bundled_python_abi}.dll"
-            "${CMAKE_PREFIX_PATH}/libpython/vcruntime140.dll"
-            "${CMAKE_PREFIX_PATH}/libpython/vcruntime140_1.dll"
+            "${_bundled_python_root}/python${_bundled_python_abi}.dll"
+            "${_bundled_python_root}/vcruntime140.dll"
+            "${_bundled_python_root}/vcruntime140_1.dll"
             "$<TARGET_FILE_DIR:${_TEST_NAME}_tests>"
         COMMENT "Copying Python runtime for slic3rutils plugin host API tests"
         VERBATIM
@@ -109,7 +110,7 @@ elseif (NOT FLATPAK)
         COMMAND ${CMAKE_COMMAND} -E rm -rf
             "$<TARGET_FILE_DIR:${_TEST_NAME}_tests>/python"
         COMMAND ${CMAKE_COMMAND} -E copy_directory
-            "${CMAKE_PREFIX_PATH}/libpython"
+            "${_bundled_python_root}"
             "$<TARGET_FILE_DIR:${_TEST_NAME}_tests>/python"
         COMMENT "Copying Python runtime for the plugin host API tests"
         VERBATIM
@@ -121,7 +122,7 @@ elseif (FLATPAK)
         COMMAND ${CMAKE_COMMAND} -E rm -rf
             "$<TARGET_FILE_DIR:${_TEST_NAME}_tests>/python"
         COMMAND ${CMAKE_COMMAND} -E create_symlink
-            "${CMAKE_PREFIX_PATH}/libpython"
+            "${_bundled_python_root}"
             "$<TARGET_FILE_DIR:${_TEST_NAME}_tests>/python"
         COMMENT "Linking Python runtime for flatpak plugin host API tests"
         VERBATIM

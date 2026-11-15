@@ -1,7 +1,5 @@
 name: Build Windows
 
-# Manually run this one platform without starting Build all.
-# GitHub Actions -> Run workflow -> choose review/orca-mpw-v2.5.0.
 on:
   workflow_dispatch:
     inputs:
@@ -9,9 +7,14 @@ on:
         description: Build dependencies only (no installer or tests)
         type: boolean
         default: false
+      architecture:
+        description: Windows architecture
+        type: choice
+        default: both
+        options: [both, x64, arm64]
 
 concurrency:
-  group: mpw-windows-${{ github.ref }}
+  group: mpw-windows-${{ github.ref }}-${{ inputs.architecture }}
   cancel-in-progress: false
 
 permissions:
@@ -37,25 +40,34 @@ jobs:
         shell: powershell
         run: .\scripts\test_prune_cached_presets.ps1
 
-  build_windows:
-    name: Build Windows ${{ matrix.arch }}
+  build_windows_x64:
+    name: Build Windows x64
     needs: check_build_script
-    strategy:
-      fail-fast: false
-      matrix:
-        include: ${{ fromJSON(vars.SELF_HOSTED && '[{"arch":"x64","os":"orca-win-server","compiler":"clang"}]' || '[{"arch":"x64","os":"windows-latest","compiler":"clang"},{"arch":"arm64","os":"windows-11-vs2026-arm","compiler":"clang"}]') }}
+    if: ${{ (inputs.architecture == 'both' || inputs.architecture == 'x64') }}
     uses: ./.github/workflows/build_check_cache.yml
     with:
-      os: ${{ matrix.os }}
-      arch: ${{ matrix.arch }}
-      compiler: ${{ matrix.compiler }}
+      os: ${{ vars.SELF_HOSTED && 'orca-win-server' || 'windows-latest' }}
+      arch: x64
+      compiler: clang
+      build-deps-only: ${{ inputs.build-deps-only }}
+    secrets: inherit
+
+  build_windows_arm64:
+    name: Build Windows arm64
+    needs: check_build_script
+    if: ${{ (inputs.architecture == 'both' || inputs.architecture == 'arm64') && !vars.SELF_HOSTED }}
+    uses: ./.github/workflows/build_check_cache.yml
+    with:
+      os: ${{ 'windows-11-vs2026-arm' }}
+      arch: arm64
+      compiler: clang
       build-deps-only: ${{ inputs.build-deps-only }}
     secrets: inherit
 
   unit_tests_windows_x64:
     name: Windows x64 / Unit Tests
-    needs: build_windows
-    if: ${{ !cancelled() && needs.build_windows.result == 'success' && !inputs.build-deps-only }}
+    needs: build_windows_x64
+    if: ${{ !cancelled() && success() && !inputs.build-deps-only }}
     uses: ./.github/workflows/unit_tests.yml
     with:
       os: ${{ vars.SELF_HOSTED && 'orca-win-server' || 'windows-latest' }}
@@ -63,8 +75,8 @@ jobs:
 
   unit_tests_windows_arm64:
     name: Windows ARM64 / Unit Tests
-    needs: build_windows
-    if: ${{ !cancelled() && needs.build_windows.result == 'success' && !inputs.build-deps-only && !vars.SELF_HOSTED }}
+    needs: build_windows_arm64
+    if: ${{ !cancelled() && success() && !inputs.build-deps-only }}
     uses: ./.github/workflows/unit_tests.yml
     with:
       os: windows-11-vs2026-arm

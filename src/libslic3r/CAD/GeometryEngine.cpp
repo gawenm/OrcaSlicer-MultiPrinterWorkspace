@@ -86,7 +86,7 @@ std::vector<TopoDS_Shape> GeometryEngine::read_step_solids(const std::string& pa
         if (out.empty())
             out.push_back(shape);
     } catch (const Standard_Failure& e) {
-        err = *e.what() ? e.what() : _u8L("OCCT failed to read STEP");
+        err = (e.GetMessageString() && *e.GetMessageString()) ? e.GetMessageString() : _u8L("OCCT failed to read STEP");
         out.clear();
     }
     return out;

@@ -681,10 +681,14 @@ if (USE_SLIC3R_CONSOLE_LOG)
 endif()
 target_include_directories(libslic3r PRIVATE ${CMAKE_CURRENT_SOURCE_DIR} ${CMAKE_CURRENT_SOURCE_DIR}/TextureToColor PUBLIC ${CMAKE_CURRENT_BINARY_DIR})
 target_include_directories(libslic3r SYSTEM PUBLIC ${EXPAT_INCLUDE_DIRS})
+if (WIN32)
+    # Expat is linked statically; upstream headers declare the API __declspec(dllimport)
+    # unless XML_STATIC is defined.
+    target_compile_definitions(libslic3r PUBLIC XML_STATIC)
+endif()
 
-# Find the OCCT and related libraries
-set(OpenCASCADE_DIR "${CMAKE_PREFIX_PATH}/lib/cmake/occt")
-find_package(OpenCASCADE REQUIRED)
+# The bundled OCCT installs its CMake package under lib/cmake/occt.
+find_package(OpenCASCADE 8.0.1 CONFIG REQUIRED PATH_SUFFIXES lib/cmake/occt)
 target_include_directories(libslic3r SYSTEM PUBLIC ${OpenCASCADE_INCLUDE_DIR})
 
 find_package(JPEG REQUIRED)
@@ -732,7 +736,7 @@ if (SLIC3R_CAD)
     # all-or-nothing, so one absent toolkit proves it; fail here rather than at link time.
     if (NOT TARGET TKFillet)
         message(FATAL_ERROR
-            "SLIC3R_CAD is ON, but the OpenCASCADE in ${CMAKE_PREFIX_PATH} was built without "
+            "SLIC3R_CAD is ON, but the OpenCASCADE in ${OpenCASCADE_DIR} was built without "
             "BUILD_MODULE_ModelingAlgorithms. Rebuild the dependencies with -DSLIC3R_CAD=ON, "
             "or configure this project with -DSLIC3R_CAD=OFF.")
     endif ()
@@ -755,6 +759,11 @@ if (WIN32)
         set(OCCT_BIN_DIR_${_build_config} "${_occt_bin}" CACHE INTERNAL "OCCT DLL directory for ${_build_config} builds")
     endforeach ()
 endif ()
+
+# Use the header paired with PNG::PNG even if a different png.h is earlier
+# in a transitive include directory.
+set_property(SOURCE PNGReadWrite.cpp APPEND PROPERTY
+    COMPILE_DEFINITIONS "ORCA_PNG_HEADER=\"${PNG_PNG_INCLUDE_DIR}/png.h\"")
 
 target_link_libraries(libslic3r
     PUBLIC

@@ -283,7 +283,7 @@ if (WIN32)
     # copy libpython to the bin folder for Windows
     add_custom_command(TARGET OrcaSlicer POST_BUILD
         COMMAND ${CMAKE_COMMAND} -E rm -rf "$<TARGET_FILE_DIR:OrcaSlicer>/python"
-        COMMAND ${CMAKE_COMMAND} -E copy_directory "${CMAKE_PREFIX_PATH}/libpython" "$<TARGET_FILE_DIR:OrcaSlicer>/python"
+        COMMAND ${CMAKE_COMMAND} -E copy_directory "${_bundled_python_root}" "$<TARGET_FILE_DIR:OrcaSlicer>/python"
         COMMENT "Copying Python runtime into the build tree"
         VERBATIM)
 
@@ -362,7 +362,7 @@ else ()
         VERBATIM)
     add_custom_command(TARGET OrcaSlicer POST_BUILD
         COMMAND ${CMAKE_COMMAND} -E rm -rf "${BIN_DIR}/python"
-        COMMAND ${CMAKE_COMMAND} -E copy_directory "${CMAKE_PREFIX_PATH}/libpython" "${BIN_DIR}/python"
+        COMMAND ${CMAKE_COMMAND} -E copy_directory "${_bundled_python_root}" "${BIN_DIR}/python"
         COMMENT "Copying Python runtime into the build tree"
         VERBATIM)
     # Stage uv next to the binary for the build-tree/.app flows, which never
@@ -396,7 +396,7 @@ if (WIN32)
         install(TARGETS OrcaSlicer_app_gui RUNTIME DESTINATION ".")
     endif ()
     install(FILES ${output_dlls_${build_type}} DESTINATION ".")
-    install(DIRECTORY "${CMAKE_PREFIX_PATH}/libpython/" DESTINATION "python")
+    install(DIRECTORY "${_bundled_python_root}/" DESTINATION "python")
 else ()
     if (APPLE)
     else()
