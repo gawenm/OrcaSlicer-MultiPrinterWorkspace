@@ -56,6 +56,27 @@ jobs:
           }
           Write-Host 'Windows dependency and application builds use O:\'
 
+      # ExternalProject downloads libdatachannel's nlohmann/json submodule on Windows.
+      # That checkout contains test-report paths exceeding MAX_PATH; Git for Windows
+      # needs an explicit opt-in even when the CMake build uses the short O: drive.
+      - name: Enable Git long paths for Windows dependencies
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          git config --global core.longpaths true
+          if ($LASTEXITCODE -ne 0) { throw 'Could not configure Git long-path support' }
+          $value = (git config --get core.longpaths).Trim()
+          if ($LASTEXITCODE -ne 0 -or $value -ne 'true') {
+            throw "Git long-path support not enabled: $value"
+          }
+          # Pass through every CMake-spawned git clone/submodule process, including
+          # subprocesses whose HOME or local git config differs from this step.
+          'GIT_CONFIG_COUNT=1' | Out-File -Append -FilePath $env:GITHUB_ENV -Encoding utf8
+          'GIT_CONFIG_KEY_0=core.longpaths' | Out-File -Append -FilePath $env:GITHUB_ENV -Encoding utf8
+          'GIT_CONFIG_VALUE_0=true' | Out-File -Append -FilePath $env:GITHUB_ENV -Encoding utf8
+          Write-Host 'Git long-path support enabled and exported to dependency subprocesses'
+
       - name: load cached deps
         uses: actions/cache@v6
         with:
