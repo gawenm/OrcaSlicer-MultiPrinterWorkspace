@@ -3,7 +3,15 @@
 # share an ABI, so clang-cl builds compile OCCT with cl. The Visual Studio generator picks the
 # compiler by toolset, so there OCCT may stay on clang-cl; keep precompiled headers off there.
 set(_occt_compiler_args "")
+# Windows MSVC builds have encountered C1083 (compiler-generated file) and C1001
+# (internal compiler error) while compiling OCCT with precompiled headers.
+# Disable OCCT PCH on Windows for the release-candidate diagnostic build.
+# This avoids relying on multi-GB compiler-generated PCH files; it may
+# increase compile time. Re-enable only after clean CI validation.
 set(_occt_pch ON)
+if (WIN32)
+    set(_occt_pch OFF)
+endif ()
 if (MSVC AND CMAKE_CXX_COMPILER_ID STREQUAL "Clang")
     if ("${DEPS_ARCH}" STREQUAL "arm64" OR NOT CMAKE_GENERATOR MATCHES "Visual Studio")
         set(_occt_compiler_args -DCMAKE_C_COMPILER:STRING=cl -DCMAKE_CXX_COMPILER:STRING=cl)
