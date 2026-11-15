@@ -42,6 +42,20 @@ jobs:
         with:
           lfs: 'false'
 
+      # Preserve a short CMake source/build prefix for OCCT's long generated file names.
+      # Both dependency and application jobs must map the same alias for cached paths.
+      - name: Map short Windows build workspace
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          if (Test-Path 'O:\') { throw 'O: is already in use; cannot map the short build workspace' }
+          subst.exe O: "$env:GITHUB_WORKSPACE"
+          if ($LASTEXITCODE -ne 0 -or -not (Test-Path 'O:\build_win.bat')) {
+            throw 'Could not map O: to the checked-out repository'
+          }
+          Write-Host 'Windows dependency and application builds use O:\'
+
       - name: load cached deps
         uses: actions/cache@v6
         with:
@@ -122,9 +136,10 @@ jobs:
               choco install strawberryperl
             }
             # cache-path is the install directory inside the deps build directory.
-            $deps = (Split-Path "${{ github.workspace }}/${{ inputs.cache-path }}").Replace('\', '/')
+            $deps = (Split-Path "O:/${{ inputs.cache-path }}").Replace('\', '/')
             # -l compiles with Visual Studio's clang-cl and -x builds with Ninja; --msvc --msbuild is cl under the Visual Studio generator.
             $flags = if ("${{ inputs.compiler }}" -eq "clang") { "-l", "-x" } else { "--msvc", "--msbuild" }
+            Set-Location 'O:\'
             .\build_win.bat -d --arch ${{ inputs.arch }} --deps-dir $deps @flags
         shell: pwsh
 

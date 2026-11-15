@@ -44,6 +44,20 @@ jobs:
         with:
           lfs: 'false'
 
+      # Preserve a short CMake source/build prefix for OCCT's long generated file names.
+      # Both dependency and application jobs must map the same alias for cached paths.
+      - name: Map short Windows build workspace
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          if (Test-Path 'O:\') { throw 'O: is already in use; cannot map the short build workspace' }
+          subst.exe O: "$env:GITHUB_WORKSPACE"
+          if ($LASTEXITCODE -ne 0 -or -not (Test-Path 'O:\build_win.bat')) {
+            throw 'Could not map O: to the checked-out repository'
+          }
+          Write-Host 'Windows dependency and application builds use O:\'
+
       - name: load cached deps
         if: ${{ !(runner.os == 'macOS' && inputs.macos-combine-only) }}
         uses: actions/cache@v6
@@ -543,10 +557,11 @@ jobs:
         # --tests builds the unit tests too; the unit_tests_windows_* jobs run them.
         run: |
           # cache-path is the install directory inside the deps build directory.
-          $deps = (Split-Path "${{ github.workspace }}/${{ inputs.cache-path }}").Replace('\', '/')
+          $deps = (Split-Path "O:/${{ inputs.cache-path }}").Replace('\', '/')
           # -l compiles with Visual Studio's clang-cl and -x builds with Ninja; --msvc --msbuild is cl under the Visual Studio generator.
           # The clang build is the one that ships: a cl build packs and uploads under _msvc names, and only the clang build is tested, checked and deployed.
           $flags = if ("${{ inputs.compiler }}" -eq "clang") { "-l", "-x" } else { "--msvc", "--msbuild" }
+          Set-Location 'O:\'
           .\build_win.bat -s --tests -i --arch ${{ inputs.arch }} --build-dir $env:BUILD_DIR --deps-dir $deps @flags
         shell: pwsh
 
