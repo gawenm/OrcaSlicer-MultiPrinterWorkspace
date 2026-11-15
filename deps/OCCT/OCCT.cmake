@@ -7,8 +7,10 @@ endif ()
 
 if(WIN32)
     set(library_build_type "Shared")
+    set(_occt_pch_args -DBUILD_USE_PCH=OFF)
 else()
     set(library_build_type "Static")
+    set(_occt_pch_args "")
 endif()
 
 # SLIC3R_CAD (declared in deps/CMakeLists.txt) builds OCCT's ModelingAlgorithms module
@@ -32,11 +34,9 @@ endif ()
 orcaslicer_add_cmake_project(OCCT
     URL https://github.com/Open-Cascade-SAS/OCCT/archive/refs/tags/V8_0_1.zip
     URL_HASH SHA256=7c033d917ee8f040c0512d289dcc5f02c148889d5bac17c3e25639accb44f0da
-    # Fix BRepMesh seam triangulation (Open-Cascade-SAS/OCCT#572) and work around
-    # the MSVC ARM64 optimizer crash in BRepGraph_LayerTopoSupplement.
+    # Fix BRepMesh seam triangulation (Open-Cascade-SAS/OCCT#572).
     PATCH_COMMAND git apply ${OCCT_DIRECTORY_FLAG} --verbose --ignore-space-change --whitespace=fix
         ${CMAKE_CURRENT_LIST_DIR}/0001-BRepMesh-seam-pcurve-at-edge-parameter.patch
-        ${CMAKE_CURRENT_LIST_DIR}/0002-msvc-arm64-owner-kind-optimizer.patch
     #DEPENDS dep_Boost
     CMAKE_ARGS
         -DCMAKE_CXX_STANDARD=17
@@ -62,4 +62,5 @@ orcaslicer_add_cmake_project(OCCT
         -DBUILD_MODULE_ModelingData=OFF
         -DBUILD_MODULE_Visualization=OFF
         ${_occt_compiler_args}
+        ${_occt_pch_args}
 )

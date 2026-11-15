@@ -67,18 +67,21 @@ jobs:
           conclusion=$(echo "$info" | jq -r '.conclusion')
           branch=$(echo "$info" | jq -r '.headBranch')
           echo "Source run #$RUN_ID: '$name' on '$branch' (conclusion: $conclusion)"
-          if [ "$conclusion" != "success" ]; then
-            echo "::warning::Source run did not conclude 'success' ($conclusion). Some assets may be missing."
+          if [ "$name" != "Build all" ] || [ "$conclusion" != "success" ]; then
+            echo "::error::Release assets require a successful Build all run."
+            exit 1
           fi
 
       - name: Download release artifacts from build run
         run: |
-          # Windows_V* (not Windows_*) keeps the MSIX Store artifact out: it goes to Partner Center, not GitHub releases.
+          # The public Windows release uses the x64 installer and portable build.
           gh run download "$RUN_ID" --repo "$GITHUB_REPOSITORY" --dir artifacts \
-            -p 'OrcaSlicer_Windows_V*' \
+            -p 'OrcaSlicer_Windows_V*_x64*' \
             -p 'OrcaSlicer_Mac_universal_*' \
             -p 'OrcaSlicer_Linux_ubuntu_*' \
             -p 'OrcaSlicer-Linux-flatpak_*' \
+            -p 'Orca-MPW-Arch-x86_64' \
+            -p 'Orca-MPW-Debian-amd64' \
             -p 'PDB'
           echo "Downloaded artifact folders:"
           ls -1 artifacts
@@ -92,21 +95,23 @@ jobs:
           # binaries are already unzipped. Copy the inner binary for each platform.
           # -type f is required (some artifact *folders* are named "*.flatpak").
 
-          # Windows installers (x64 + arm64): the .exe inside each installer
+          # Windows x64 installer: the .exe inside its installer
           # artifact, NOT the orca-slicer.exe in the portable app folder. CPack
-          # now bakes the arch into the filename (…_x64.exe / …_arm64.exe), so
+          # bakes x64 into the filename, so
           # copy them straight through.
           find artifacts -type f -name '*.exe' -path '*OrcaSlicer_Windows_V*' ! -path '*_portable*' -exec cp -v {} upload/ \;
           # macOS universal DMG (profile-validator DMG isn't downloaded).
           find artifacts -type f -name '*.dmg' -path '*OrcaSlicer_Mac_universal_*' -exec cp -v {} upload/ \;
           # Linux AppImage.
           find artifacts -type f -name '*.AppImage' -exec cp -v {} upload/ \;
+          # Native Arch and Debian packages.
+          find artifacts -type f \( -name '*.pkg.tar.zst' -o -name '*.deb' \) -exec cp -v {} upload/ \;
           # Flatpak bundles (x86_64 + aarch64).
           find artifacts -type f -name '*.flatpak' -exec cp -v {} upload/ \;
           # Windows debug symbols (PDB archive, for developers).
           find artifacts -type f -name 'Debug_PDB_*.7z' -exec cp -v {} upload/ \;
 
-          # Portable Windows builds (x64 + arm64) are unzipped folder artifacts;
+          # The portable Windows build is an unzipped folder artifact;
           # re-zip each to its released filename (these stay .zip on the release).
           mapfile -t portable_dirs < <(find artifacts -maxdepth 1 -type d -name 'OrcaSlicer_Windows_*_portable')
           if [ ${#portable_dirs[@]} -eq 0 ]; then
@@ -119,10 +124,16 @@ jobs:
 
           echo "Assets to upload:"
           ls -lh upload
-          if [ -z "$(ls -A upload)" ]; then
-            echo "::error::No assets assembled. Check the run_id and that its artifacts haven't expired."
-            exit 1
-          fi
+          shopt -s nullglob
+          for pattern in '*_x64.exe' '*_x64_portable.zip' '*_Mac_universal_*.dmg' \
+              '*_Ubuntu2404_V*.AppImage' '*_Ubuntu2404_aarch64_V*.AppImage' \
+              '*_x86_64.flatpak' '*_aarch64.flatpak' '*.pkg.tar.zst' '*.deb'; do
+            matches=(upload/$pattern)
+            if (( ${#matches[@]} != 1 )); then
+              echo "::error::Expected exactly one release asset matching $pattern. Check the full Build all run and artifact retention."
+              exit 1
+            fi
+          done
 
       - name: Upload assets to draft release
         run: |

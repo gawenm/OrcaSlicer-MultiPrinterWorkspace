@@ -7,14 +7,9 @@ on:
         description: Build dependencies only (no installer or tests)
         type: boolean
         default: false
-      architecture:
-        description: Windows architecture
-        type: choice
-        default: both
-        options: [both, x64, arm64]
 
 concurrency:
-  group: mpw-windows-${{ github.ref }}-${{ inputs.architecture }}
+  group: mpw-windows-${{ github.ref }}
   cancel-in-progress: false
 
 permissions:
@@ -43,23 +38,10 @@ jobs:
   build_windows_x64:
     name: Build Windows x64
     needs: check_build_script
-    if: ${{ (inputs.architecture == 'both' || inputs.architecture == 'x64') }}
     uses: ./.github/workflows/build_check_cache.yml
     with:
       os: ${{ vars.SELF_HOSTED && 'orca-win-server' || 'windows-latest' }}
       arch: x64
-      compiler: clang
-      build-deps-only: ${{ inputs.build-deps-only }}
-    secrets: inherit
-
-  build_windows_arm64:
-    name: Build Windows arm64
-    needs: check_build_script
-    if: ${{ (inputs.architecture == 'both' || inputs.architecture == 'arm64') && !vars.SELF_HOSTED }}
-    uses: ./.github/workflows/build_check_cache.yml
-    with:
-      os: ${{ 'windows-11-vs2026-arm' }}
-      arch: arm64
       compiler: clang
       build-deps-only: ${{ inputs.build-deps-only }}
     secrets: inherit
@@ -72,13 +54,3 @@ jobs:
     with:
       os: ${{ vars.SELF_HOSTED && 'orca-win-server' || 'windows-latest' }}
       artifact: ${{ github.sha }}-tests-windows-x64
-
-  unit_tests_windows_arm64:
-    name: Windows ARM64 / Unit Tests
-    needs: build_windows_arm64
-    if: ${{ !cancelled() && success() && !inputs.build-deps-only }}
-    uses: ./.github/workflows/unit_tests.yml
-    with:
-      os: windows-11-vs2026-arm
-      artifact: ${{ github.sha }}-tests-windows-arm64
-      test-dir: build-arm64/tests

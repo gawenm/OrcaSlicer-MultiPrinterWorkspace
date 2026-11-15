@@ -18,58 +18,18 @@ runs:
       if: runner.os == 'Windows'
       uses: microsoft/setup-msbuild@v3
 
-    - name: Install MSYS2 (clangarm64) with GMP/MPFR and LLVM tools
-      if: runner.os == 'Windows' && inputs.arch == 'arm64'
-      uses: msys2/setup-msys2@v2
-      with:
-        msystem: CLANGARM64
-        update: true
-        install: >-
-          mingw-w64-clang-aarch64-gmp
-          mingw-w64-clang-aarch64-mpfr
-          mingw-w64-clang-aarch64-llvm
-
-    - name: Stage ARM64 GMP/MPFR (no prebuilt blobs exist for win-arm64)
-      # GMP/MPFR ship prebuilt x64/x86 blobs in-tree but none for ARM64.
-      # Pull them from MSYS2 clangarm64 and generate MSVC import libs via
-      # llvm-dlltool, then stage into deps/{GMP,MPFR}/.../win-arm64 where the
-      # MSVC branch of GMP.cmake/MPFR.cmake copies them into the dep prefix.
-      if: runner.os == 'Windows' && inputs.arch == 'arm64'
-      shell: msys2 {0}
-      run: |
-        set -euo pipefail
-        BIN=/clangarm64/bin
-        REPO=$(cygpath -u "$GITHUB_WORKSPACE")
-
-        make_import_lib() {
-          local dll="$1"; local lib="$2"; local def="/tmp/${dll%.dll}.def"
-          echo "EXPORTS" > "$def"
-          llvm-readobj --coff-exports "$BIN/$dll" | awk '/Name: /{print $2}' >> "$def"
-          llvm-dlltool -m arm64 -D "$dll" -d "$def" -l "$BIN/$lib"
-        }
-
-        make_import_lib libgmp-10.dll libgmp-10.lib
-
-        # MPFR 4.x ships as libmpfr-6.dll; rename to libmpfr-4 BEFORE generating
-        # the import lib so the baked-in runtime DLL name is correct.
-        MPFR_DLL=$(ls $BIN/libmpfr-*.dll | head -1 | xargs basename)
-        if [ "$MPFR_DLL" != "libmpfr-4.dll" ]; then cp "$BIN/$MPFR_DLL" "$BIN/libmpfr-4.dll"; fi
-        make_import_lib libmpfr-4.dll libmpfr-4.lib
-
-        mkdir -p $REPO/deps/GMP/gmp/lib/win-arm64 $REPO/deps/MPFR/mpfr/lib/win-arm64
-        cp $BIN/libgmp-10.dll $BIN/libgmp-10.lib $REPO/deps/GMP/gmp/lib/win-arm64/
-        cp $BIN/libmpfr-4.dll $BIN/libmpfr-4.lib $REPO/deps/MPFR/mpfr/lib/win-arm64/
-        cp /clangarm64/include/gmp.h  $REPO/deps/GMP/gmp/include/
-        cp /clangarm64/include/mpfr.h $REPO/deps/MPFR/mpfr/include/ || true
-
-    # Build Dependencies
     - name: Build on Windows
       if: runner.os == 'Windows'
       working-directory: ${{ github.workspace }}
       run: |
           # Git checks out third-party submodules in deeply nested dependency directories.
           # Enable Windows long-path handling before CMake downloads dep_DataChannel.
-          git config --global core.longpaths true
+          $gitConfigIndex = [int]$env:GIT_CONFIG_COUNT
+          [Environment]::SetEnvironmentVariable("GIT_CONFIG_KEY_$gitConfigIndex", "core.longpaths")
+          [Environment]::SetEnvironmentVariable("GIT_CONFIG_VALUE_$gitConfigIndex", "true")
+          $env:GIT_CONFIG_COUNT = ($gitConfigIndex + 1).ToString()
+          git config --bool --get core.longpaths
+          if ($LASTEXITCODE -ne 0) { throw "Could not enable Git long paths" }
           if ("${{ inputs.self-hosted }}" -ne "true") {
             choco install strawberryperl
           }
@@ -78,7 +38,7 @@ runs:
           # -l compiles with Visual Studio's clang-cl and -x builds with Ninja; --msvc --msbuild is cl under the Visual Studio generator.
           $flags = if ("${{ inputs.compiler }}" -eq "clang") { "-l", "-x" } else { "--msvc", "--msbuild" }
           $buildScript = ".\build_win.bat"
-          # OCCT generates paths too long for MSVC on both hosted Windows architectures.
+          # OCCT can generate paths too long for Windows compilers.
           # Subst shortens compiler-visible paths without changing the cached files.
           $mappedDrive = $false
           if ("${{ inputs.self-hosted }}" -ne "true") {
