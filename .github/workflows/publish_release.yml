@@ -149,7 +149,8 @@ jobs:
               *Windows_Installer_*_x64.exe)   echo "01|Windows installer (x64)" ;;
               *_x64_portable.zip)             echo "02|Windows portable (x64)" ;;
               *.dmg)                          echo "03|macOS (Apple Silicon and Intel)" ;;
-              *.AppImage)                     case "$1" in *_aarch64_*) echo "05|Linux AppImage (aarch64)";; *) echo "04|Linux AppImage (x86_64)";; esac ;;
+              *_aarch64_*.AppImage)           echo "05|Linux AppImage (aarch64)" ;;
+              *.AppImage)                     echo "04|Linux AppImage (x86_64)" ;;
               *_x86_64.flatpak)               echo "06|Linux Flatpak (x86_64)" ;;
               *_aarch64.flatpak)              echo "07|Linux Flatpak (aarch64)" ;;
               Debug_PDB_*)                    echo "08|Windows debug symbols (for developers)" ;;
