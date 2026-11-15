@@ -35,10 +35,10 @@ jobs:
       - name: Initialize MSVC x64 compiler environment
         run: |
           $ErrorActionPreference = 'Stop'
-          $vswhere = Join-Path ${env:ProgramFiles(x86)} 'Microsoft Visual Studio\\Installer\\vswhere.exe'
+          $vswhere = Join-Path ${env:ProgramFiles(x86)} 'Microsoft Visual Studio\Installer\vswhere.exe'
           $vs = & $vswhere -latest -products * -property installationPath
           if ($LASTEXITCODE -ne 0 -or -not $vs) { throw 'Visual Studio not found' }
-          $vcvars = Join-Path $vs 'VC\\Auxiliary\\Build\\vcvars64.bat'
+          $vcvars = Join-Path $vs 'VC\Auxiliary\Build\vcvars64.bat'
           if (-not (Test-Path $vcvars)) { throw "Missing vcvars64.bat: $vcvars" }
           $lines = & cmd.exe /d /s /c "`"`"$vcvars`" >nul && set`""
           if ($LASTEXITCODE -ne 0) { throw 'vcvars64.bat failed' }
