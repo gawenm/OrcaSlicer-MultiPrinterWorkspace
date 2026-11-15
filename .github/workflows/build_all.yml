@@ -155,15 +155,11 @@ jobs:
     name: Build Windows ${{ matrix.arch }}
     strategy:
       fail-fast: false
-      # SELF_HOSTED skips arm64 (the self-hosted Windows server is x64-only).
-      # So does a pull request; build_optional.yml builds arm64 on the
-      # build-windows-arm64 label or a change outside the sources.
+      # Windows builds target x64 only, on either hosted or self-hosted runners.
       matrix:
         include: ${{ fromJSON(vars.SELF_HOSTED
           && '[{"arch":"x64","os":"orca-win-server","compiler":"clang"}]'
-          || (github.event_name == 'pull_request'
-            && '[{"arch":"x64","os":"windows-latest","compiler":"clang"}]'
-            || '[{"arch":"x64","os":"windows-latest","compiler":"clang"},{"arch":"arm64","os":"windows-11-vs2026-arm","compiler":"clang"}]')) }}
+          || '[{"arch":"x64","os":"windows-latest","compiler":"clang"}]') }}
     needs: check_build_script
     # id-token lets release builds sign through Google Cloud Workload Identity Federation (see
     # "Configure code signing" in build_orca.yml); the rest is what the build already used.
@@ -234,15 +230,6 @@ jobs:
     with:
       os: ${{ vars.SELF_HOSTED && 'orca-win-server' || 'windows-latest' }}
       artifact: ${{ github.sha }}-tests-windows-x64
-  unit_tests_windows_arm64:
-    name: Windows arm64
-    needs: build_windows
-    if: ${{ !cancelled() && needs.build_windows.result == 'success' && !vars.SELF_HOSTED && github.event_name != 'pull_request' }}
-    uses: ./.github/workflows/unit_tests.yml
-    with:
-      os: windows-11-vs2026-arm
-      artifact: ${{ github.sha }}-tests-windows-arm64
-      test-dir: build-arm64/tests
   unit_tests_macos_arm64:
     name: macOS arm64
     needs: build_macos_arch
@@ -280,7 +267,7 @@ jobs:
           ./validator-bin/OrcaSlicer_profile_validator -p "${{ github.workspace }}/resources/profiles" -s -l 2
   publish_test_results:
     name: Publish Test Results
-    needs: [unit_tests_linux_x86_64, unit_tests_linux_aarch64, unit_tests_windows_x64, unit_tests_windows_arm64, unit_tests_macos_arm64, flatpak]
+    needs: [unit_tests_linux_x86_64, unit_tests_linux_aarch64, unit_tests_windows_x64, unit_tests_macos_arm64, flatpak]
     if: ${{ !cancelled() }}
     runs-on: ubuntu-latest
     steps:
