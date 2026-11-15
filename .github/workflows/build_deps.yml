@@ -35,6 +35,7 @@ jobs:
       - name: Build dependencies
         uses: ./.github/actions/build-deps
         with:
+          self-hosted: ${{ vars.SELF_HOSTED && 'true' || 'false' }}
           arch: ${{ inputs.arch }}
           compiler: ${{ inputs.compiler }}
           cache-path: ${{ inputs.cache-path }}

@@ -5,6 +5,9 @@ inputs:
     description: Build target architecture
   compiler:
     description: Windows application compiler
+  self-hosted:
+    description: Whether the job uses a self-hosted runner
+    default: "false"
   cache-path:
     description: Workspace-relative dependency installation directory
     required: true
@@ -67,7 +70,7 @@ runs:
           # Git checks out third-party submodules in deeply nested dependency directories.
           # Enable Windows long-path handling before CMake downloads dep_DataChannel.
           git config --global core.longpaths true
-          if (-not "${{ vars.SELF_HOSTED }}") {
+          if ("${{ inputs.self-hosted }}" -ne "true") {
             choco install strawberryperl
           }
           # cache-path is the install directory inside the deps build directory.
@@ -78,7 +81,7 @@ runs:
           # OCCT generates paths too long for MSVC on both hosted Windows architectures.
           # Subst shortens compiler-visible paths without changing the cached files.
           $mappedDrive = $false
-          if (-not "${{ vars.SELF_HOSTED }}") {
+          if ("${{ inputs.self-hosted }}" -ne "true") {
             $drive = "O:"
             & subst.exe $drive "${{ github.workspace }}"
             if ($LASTEXITCODE -ne 0) { throw "Could not map short build path $drive" }
@@ -100,14 +103,14 @@ runs:
       working-directory: ${{ github.workspace }}
       shell: bash
       run: |
-          if [ -z "${{ vars.SELF_HOSTED }}" ]; then
+          if [ "${{ inputs.self-hosted }}" != true ]; then
             brew install automake texinfo libtool pkgconf yasm nasm
           fi
-          ./build_release_macos.sh -dx ${{ !vars.SELF_HOSTED && '-j 3' || '' }} -a ${{ inputs.arch }} -t 10.15 -- "-DDESTDIR=$GITHUB_WORKSPACE/${{ inputs.cache-path }}"
+          ./build_release_macos.sh -dx ${{ inputs.self-hosted != 'true' && '-j 3' || '' }} -a ${{ inputs.arch }} -t 10.15 -- "-DDESTDIR=$GITHUB_WORKSPACE/${{ inputs.cache-path }}"
 
 
     - name: Apt-Install Dependencies
-      if: runner.os == 'Linux' && !vars.SELF_HOSTED
+      if: runner.os == 'Linux' && inputs.self-hosted != 'true'
       uses: ./.github/actions/apt-install-deps
 
     - name: Build on Ubuntu
