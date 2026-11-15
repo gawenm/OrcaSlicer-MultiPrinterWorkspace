@@ -1,15 +1,17 @@
 # clang-cl cannot emit some OCCT sources for ARM64 (llvm/llvm-project#62081), and with OCCT's
 # precompiled headers it can break exception copies (llvm/llvm-project#53486). cl and clang-cl
-# share an ABI, so clang-cl builds compile OCCT with cl. The Visual Studio generator picks the
-# compiler by toolset, so there OCCT may stay on clang-cl; keep precompiled headers off there.
+# share an ABI, so clang-cl builds compile OCCT with cl where supported.
+# Windows CI has also hit MSVC C1083 on TKGeomAlgo's very long generated object paths
+# with /Yu and /Fp. Combine the Windows short workspace path used by the workflows
+# with PCH disabled for OCCT only; leave other platforms' OCCT PCH unchanged.
 set(_occt_compiler_args "")
 set(_occt_pch ON)
+if (WIN32)
+    set(_occt_pch OFF)
+endif ()
 if (MSVC AND CMAKE_CXX_COMPILER_ID STREQUAL "Clang")
     if ("${DEPS_ARCH}" STREQUAL "arm64" OR NOT CMAKE_GENERATOR MATCHES "Visual Studio")
         set(_occt_compiler_args -DCMAKE_C_COMPILER:STRING=cl -DCMAKE_CXX_COMPILER:STRING=cl)
-    endif ()
-    if (CMAKE_GENERATOR MATCHES "Visual Studio")
-        set(_occt_pch OFF)
     endif ()
 endif ()
 
