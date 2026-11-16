@@ -7,6 +7,10 @@ on:
         description: Build dependencies only (no installer or tests)
         type: boolean
         default: false
+      build-arm64:
+        description: Also build and test Windows ARM64 (OCCT compiler workaround validation)
+        type: boolean
+        default: false
 
 concurrency:
   group: mpw-windows-${{ github.ref }}
@@ -54,3 +58,25 @@ jobs:
     with:
       os: ${{ vars.SELF_HOSTED && 'orca-win-server' || 'windows-latest' }}
       artifact: ${{ github.sha }}-tests-windows-x64
+
+  build_windows_arm64:
+    name: Build Windows ARM64
+    needs: check_build_script
+    if: ${{ inputs.build-arm64 && !vars.SELF_HOSTED }}
+    uses: ./.github/workflows/build_check_cache.yml
+    with:
+      os: windows-11-vs2026-arm
+      arch: arm64
+      compiler: clang
+      build-deps-only: ${{ inputs.build-deps-only }}
+    secrets: inherit
+
+  unit_tests_windows_arm64:
+    name: Windows ARM64 / Unit Tests
+    needs: build_windows_arm64
+    if: ${{ !cancelled() && success() && !inputs.build-deps-only }}
+    uses: ./.github/workflows/unit_tests.yml
+    with:
+      os: windows-11-vs2026-arm
+      artifact: ${{ github.sha }}-tests-windows-arm64
+      test-dir: build-arm64/tests
