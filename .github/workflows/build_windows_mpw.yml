@@ -28,7 +28,8 @@ permissions:
 jobs:
   check_build_script:
     name: Validate Windows build scripts
-    runs-on: ${{ inputs.build-arm64 && !inputs.build-x64 && 'windows-11-vs2026-arm' || 'windows-latest' }}
+    # Script fixtures assume an x64 host; this job does not build the application.
+    runs-on: windows-latest
     steps:
       - uses: actions/checkout@v7
         with:
