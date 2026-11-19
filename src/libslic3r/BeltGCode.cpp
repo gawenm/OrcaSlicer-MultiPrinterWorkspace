@@ -31,20 +31,22 @@ void BeltGCode::write_belt_header(GCodeOutputStream &file, const Print &print)
     file.write_format("; belt_frame_tilt_angle = %.1f\n", print.config().belt_frame_tilt_angle.value);
 }
 
-void BeltGCode::on_set_origin(const PrintObject * /*obj*/, const Point & /*inst_shift*/)
+void BeltGCode::on_set_origin(const PrintObject *obj, const Point & /*inst_shift*/)
 {
     // Matches the per-instance Z-offset added in PrintObjectSlice.cpp: transform
     // the origin through the belt pipeline so that back_transform(T * origin) =
     // origin (correct machine position). The back_transform applied during
     // G-code emission is the inverse of the forward transform.
 
-    // Adjust origin: transform through belt forward pipeline so that
-    // the back-transform correctly recovers model-space positions.
-    Transform3d T = BeltTransformPipeline::build_forward_transform(m_config);
-    Vec2d cur_origin = this->origin();
-    Vec3d origin3d(cur_origin.x(), cur_origin.y(), 0.);
-    Vec3d adjusted = T.linear() * origin3d;
-    this->set_origin(Vec2d(adjusted.x(), adjusted.y()));
+    // GCode stores origins in workspace XY, and the writer subtracts the
+    // unrotated plate origin before applying belt kinematics. Rotate only the
+    // plate-local part; restore the workspace offset for the writer to remove.
+    // This also matches the plate-local Z compensation in PrintObjectSlice.
+    const Transform3d T = BeltTransformPipeline::build_forward_transform(m_config);
+    const Vec2d plate_origin = obj->print()->get_plate_origin().head<2>();
+    const Vec2d local_origin = this->origin() - plate_origin;
+    const Vec3d adjusted = T.linear() * Vec3d(local_origin.x(), local_origin.y(), 0.);
+    this->set_origin(Vec2d(adjusted.x(), adjusted.y()) + plate_origin);
 }
 
 } // namespace Slic3r
