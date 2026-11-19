@@ -795,3 +795,79 @@ TEST_CASE("The temperature tower steps the temperature of the tool printing it",
         CHECK(tools == std::set<std::string>{multi_tool ? "1" : "none"});
     }
 }
+
+
+// A physical print must not depend on where its virtual plate is displayed.
+// Exercise the actual slicing, layer-Z compensation and G-code writer in
+// both belt and conventional modes, including a long negative workspace Y.
+TEST_CASE("Virtual plate placement does not alter physical print coordinates", "[GCode][Belt][Regression]")
+{
+    const bool belt = GENERATE(false, true);
+    auto config = Test::multifilament_config(1, {
+        {"gcode_flavor", "klipper"},
+        {"layer_height", "0.2"},
+        {"first_layer_height", "0.2"},
+        {"gcode_comments", "1"},
+        {"machine_start_gcode", ""},
+        {"machine_end_gcode", ""},
+        {"before_layer_change_gcode", ""},
+        {"layer_change_gcode", ""},
+        {"belt_printer", belt ? "1" : "0"},
+        {"belt_slice_rotation", "x"},
+        {"belt_slice_rotation_angle", "45"},
+        {"gcode_remap_x", "pos_x"},
+        {"gcode_remap_y", "pos_z"},
+        {"gcode_remap_z", "pos_y"},
+        {"enable_belt_purge_tower", "0"},
+        {"enable_support", "0"},
+    });
+
+    struct Bounds {
+        Vec3d min = Vec3d::Constant(1.e9);
+        Vec3d max = Vec3d::Constant(-1.e9);
+        double first_layer_z = 0.;
+        size_t count = 0;
+    };
+    const auto slice_at = [&config](const Vec3d &plate_origin) {
+        Print print;
+        Model model;
+        ModelObject *object = model.add_object();
+        object->name = "plate-origin-cube";
+        object->add_volume(Test::cube(10.));
+        object->add_instance()->set_offset(Vec3d(80., 80., 0.) + plate_origin);
+        object->ensure_on_bed();
+        print.set_plate_origin(plate_origin);
+        print.auto_assign_extruders(object);
+        print.apply(model, config);
+        print.validate();
+        print.set_status_silent();
+        const std::string gcode = Test::gcode(print);
+
+        Bounds bounds;
+        REQUIRE_FALSE(print.objects().empty());
+        REQUIRE_FALSE(print.objects().front()->layers().empty());
+        bounds.first_layer_z = print.objects().front()->layers().front()->print_z;
+        GCodeReader reader;
+        reader.parse_buffer(gcode, [&bounds](GCodeReader &self, const GCodeReader::GCodeLine &line) {
+            if (!line.extruding(self) || line.comment().find("perimeter") == std::string::npos)
+                return;
+            const Vec3d p(line.new_X(self), line.new_Y(self), line.new_Z(self));
+            bounds.min = bounds.min.cwiseMin(p);
+            bounds.max = bounds.max.cwiseMax(p);
+            ++bounds.count;
+        });
+        REQUIRE(bounds.count > 0);
+        return bounds;
+    };
+
+    const Bounds reference = slice_at(Vec3d::Zero());
+    for (const Vec3d &origin : {Vec3d(420., -1080., 0.), Vec3d(-420., 1080., 0.)}) {
+        INFO("belt=" << belt << ", workspace origin=" << origin.transpose());
+        const Bounds moved = slice_at(origin);
+        CHECK_THAT(moved.first_layer_z, Catch::Matchers::WithinAbs(reference.first_layer_z, 0.01));
+        for (int axis = 0; axis < 3; ++axis) {
+            CHECK_THAT(moved.min[axis], Catch::Matchers::WithinAbs(reference.min[axis], 0.02));
+            CHECK_THAT(moved.max[axis], Catch::Matchers::WithinAbs(reference.max[axis], 0.02));
+        }
+    }
+}
