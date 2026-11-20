@@ -37,6 +37,9 @@ on:
 jobs:
   select:
     name: Select builds
+    # A label that asks for no build must not restart the builds in progress.
+    # macos-priority restarts them, to move the macOS build to its own line.
+    if: ${{ github.event.action != 'labeled' || startsWith(github.event.label.name, 'build-') || github.event.label.name == 'macos-priority' }}
     runs-on: ubuntu-24.04
     outputs:
       flatpak: ${{ steps.select.outputs.flatpak }}
@@ -133,7 +136,7 @@ jobs:
   publish_test_results:
     name: Publish Test Results
     needs: [flatpak]
-    if: ${{ !cancelled() && needs.flatpak.result != 'skipped' }}
+    if: ${{ !cancelled() && contains(fromJSON('["success", "failure"]'), needs.flatpak.result) }}
     runs-on: ubuntu-latest
     steps:
       - name: Download Test Results
@@ -143,7 +146,10 @@ jobs:
           path: test-results
       # Best-effort, as in build_all.yml: a read-only token (e.g. fork PRs)
       # can't write the check. The test jobs gate correctness.
+      # A build that failed runs no tests; publishing nothing would post an
+      # empty result.
       - name: Publish Test Results
+        if: ${{ hashFiles('test-results/**/*.xml') != '' }}
         continue-on-error: true
         uses: EnricoMi/publish-unit-test-result-action@v2
         with:
