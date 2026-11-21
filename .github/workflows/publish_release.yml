@@ -6,9 +6,10 @@ name: Publish to draft release
 # It also writes an ordered download table into the draft's release notes.
 #
 # Trigger: Actions tab -> "Publish to draft release" -> Run workflow.
-# Locked to a single person: the first step aborts unless the actor matches the
-# `RELEASE_PUBLISHER` repo variable (set to "SoftFever"). To allow someone else,
-# change that variable: gh variable set RELEASE_PUBLISHER --body "<login>".
+# Locked to named publishers: the first step aborts unless the actor is one of the
+# logins in the `RELEASE_PUBLISHER` repo variable, a comma-separated list. To
+# change who may publish, set that variable:
+#   gh variable set RELEASE_PUBLISHER --body "<login>,<login>"
 
 on:
   workflow_dispatch:
@@ -35,16 +36,17 @@ jobs:
       RUN_ID: ${{ inputs.run_id }}
       TAG: ${{ inputs.tag }}
     steps:
-      - name: Restrict to the release publisher
+      - name: Restrict to the release publishers
         env:
-          PUBLISHER: ${{ vars.RELEASE_PUBLISHER }}
+          PUBLISHERS: ${{ vars.RELEASE_PUBLISHER }}
         run: |
-          if [ -z "$PUBLISHER" ]; then
+          if [ -z "$PUBLISHERS" ]; then
             echo "::error::RELEASE_PUBLISHER repo variable is not set."
             exit 1
           fi
-          if [ "${{ github.actor }}" != "$PUBLISHER" ]; then
-            echo "::error::Only @$PUBLISHER may run this workflow (you are @${{ github.actor }})."
+          # Pad the space-separated list so only whole logins match.
+          if [[ " ${PUBLISHERS//,/ } " != *" ${{ github.actor }} "* ]]; then
+            echo "::error::Only $PUBLISHERS may run this workflow (you are @${{ github.actor }})."
             exit 1
           fi
           echo "Authorized: @${{ github.actor }}"
@@ -76,7 +78,7 @@ jobs:
         run: |
           # Windows_V* (not Windows_*) keeps the MSIX Store artifact out: it goes to Partner Center, not GitHub releases.
           gh run download "$RUN_ID" --repo "$GITHUB_REPOSITORY" --dir artifacts \
-            -p 'OrcaSlicer_Windows_V*' \
+            -p 'OrcaSlicer_Windows_V*_x64*' \
             -p 'OrcaSlicer_Mac_universal_*' \
             -p 'OrcaSlicer_Linux_ubuntu_*' \
             -p 'OrcaSlicer-Linux-flatpak_*' \
@@ -93,11 +95,8 @@ jobs:
           # binaries are already unzipped. Copy the inner binary for each platform.
           # -type f is required (some artifact *folders* are named "*.flatpak").
 
-          # Windows installers (x64 + arm64): the .exe inside each installer
-          # artifact, NOT the orca-slicer.exe in the portable app folder. CPack
-          # now bakes the arch into the filename (…_x64.exe / …_arm64.exe), so
-          # copy them straight through.
-          find artifacts -type f -name '*.exe' -path '*OrcaSlicer_Windows_V*' ! -path '*_portable*' -exec cp -v {} upload/ \;
+          # Windows x64 installers only.
+          find artifacts -type f -name '*_x64.exe' -path '*OrcaSlicer_Windows_V*' ! -path '*_portable*' -exec cp -v {} upload/ \;
           # macOS universal DMG (profile-validator DMG isn't downloaded).
           find artifacts -type f -name '*.dmg' -path '*OrcaSlicer_Mac_universal_*' -exec cp -v {} upload/ \;
           # Linux AppImage.
@@ -107,9 +106,8 @@ jobs:
           # Windows debug symbols (PDB archive, for developers).
           find artifacts -type f -name 'Debug_PDB_*.7z' -exec cp -v {} upload/ \;
 
-          # Portable Windows builds (x64 + arm64) are unzipped folder artifacts;
-          # re-zip each to its released filename (these stay .zip on the release).
-          mapfile -t portable_dirs < <(find artifacts -maxdepth 1 -type d -name 'OrcaSlicer_Windows_*_portable')
+          # Repack Windows x64 portable artifacts only.
+          mapfile -t portable_dirs < <(find artifacts -maxdepth 1 -type d -name 'OrcaSlicer_Windows_*_x64_portable')
           if [ ${#portable_dirs[@]} -eq 0 ]; then
             echo "::warning::Windows portable artifact not found."
           fi
@@ -147,9 +145,7 @@ jobs:
           describe() {
             case "$1" in
               *Windows_Installer_*_x64.exe)   echo "01|Windows installer (x64)" ;;
-              *Windows_Installer_*_arm64.exe) echo "02|Windows installer (ARM64)" ;;
               *_x64_portable.zip)             echo "03|Windows portable (x64)" ;;
-              *_arm64_portable.zip)           echo "04|Windows portable (ARM64)" ;;
               *.dmg)                          echo "05|macOS (Apple Silicon and Intel)" ;;
               *_aarch64_*.AppImage)           echo "07|Linux AppImage (aarch64)" ;;
               *.AppImage)                     echo "06|Linux AppImage (x86_64)" ;;

@@ -1,0 +1,97 @@
+name: OCCT Windows Diagnostic
+
+on:
+  workflow_dispatch:
+    inputs:
+      parallel:
+        description: "Maximum parallel OCCT compiler jobs"
+        type: choice
+        options: ["2", "4"]
+        default: "2"
+
+permissions:
+  contents: read
+
+jobs:
+  occt-production-deps:
+    name: Orca deps / dep_OCCT (Windows clang-cl x64)
+    runs-on: windows-2022
+    timeout-minutes: 120
+    defaults:
+      run:
+        shell: pwsh
+    steps:
+      - name: Checkout MPW
+        uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - name: Set up CMake and Ninja
+        uses: lukka/get-cmake@latest
+        with:
+          cmakeVersion: "~4.3.0"
+          useLocalCache: true
+
+      - name: Initialize MSVC x64 compiler environment
+        uses: ilammy/msvc-dev-cmd@v1
+        with:
+          arch: amd64
+
+      - name: Verify MSVC compiler environment
+        run: |
+          $ErrorActionPreference = 'Stop'
+          where.exe cl
+          cl 2>&1 | Select-Object -First 3
+          if ($LASTEXITCODE -ne 0) { throw 'cl.exe unavailable after msvc-dev-cmd' }
+
+      - name: Map short OCCT workspace path
+        run: |
+          $ErrorActionPreference = 'Stop'
+          if (Test-Path 'O:\') { throw 'O: is already in use; choose another drive' }
+          subst.exe O: "$env:GITHUB_WORKSPACE"
+          if ($LASTEXITCODE -ne 0) { throw 'Cannot map O: workspace alias' }
+          if (-not (Test-Path 'O:\deps\CMakeLists.txt')) { throw 'Mapped workspace does not contain dependencies' }
+          Write-Host 'OCCT dependency build will use O:\deps\build'
+
+      - name: Configure real Orca dependency superbuild
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $vs = & "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe" -latest -products * -property installationPath
+          if ($LASTEXITCODE -ne 0 -or -not $vs) { throw 'Visual Studio not found' }
+          $clang = Join-Path $vs 'VC\Tools\Llvm\x64\bin\clang-cl.exe'
+          if (-not (Test-Path $clang)) { throw "Visual Studio clang-cl not found: $clang" }
+          Write-Host "Superbuild compiler: $clang"
+          cmake -S O:/deps -B O:/deps/build -G "Ninja Multi-Config" `
+            "-DCMAKE_C_COMPILER=$clang" "-DCMAKE_CXX_COMPILER=$clang" `
+            -DCMAKE_BUILD_TYPE=Release -DSLIC3R_CAD=ON
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          Select-String -Path O:/deps/build/CMakeCache.txt -Pattern 'CMAKE_CXX_COMPILER:|CMAKE_GENERATOR:|SLIC3R_CAD:' | ForEach-Object { $_.Line }
+
+      - name: Build only production dep_OCCT
+        env:
+          CMAKE_BUILD_PARALLEL_LEVEL: ${{ inputs.parallel }}
+        run: |
+          $ErrorActionPreference = 'Stop'
+          cmake --build O:/deps/build --config Release --target dep_OCCT --verbose 2>&1 |
+            Tee-Object -FilePath "$env:RUNNER_TEMP/occt-production.log"
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+      - name: Report actual OCCT compiler and PCH
+        if: always()
+        run: |
+          $cache = 'O:/deps/build/dep_OCCT-prefix/src/dep_OCCT-build/CMakeCache.txt'
+          if (Test-Path $cache) {
+            Select-String -Path $cache -Pattern 'BUILD_USE_PCH|CMAKE_CXX_COMPILER:|CMAKE_GENERATOR:' |
+              ForEach-Object { $_.Line }
+          } else {
+            Write-Host 'OCCT cache not yet generated'
+          }
+
+      - name: Upload diagnostic log
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: occt-production-deps-${{ github.run_id }}
+          path: ${{ runner.temp }}/occt-production.log
+          if-no-files-found: warn
+          retention-days: 7

@@ -42,6 +42,41 @@ jobs:
         with:
           lfs: 'false'
 
+      # Preserve a short CMake source/build prefix for OCCT's long generated file names.
+      # Both dependency and application jobs must map the same alias for cached paths.
+      - name: Map short Windows build workspace
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          if (Test-Path 'O:\') { throw 'O: is already in use; cannot map the short build workspace' }
+          subst.exe O: "$env:GITHUB_WORKSPACE"
+          if ($LASTEXITCODE -ne 0 -or -not (Test-Path 'O:\build_win.bat')) {
+            throw 'Could not map O: to the checked-out repository'
+          }
+          Write-Host 'Windows dependency and application builds use O:\'
+
+      # ExternalProject downloads libdatachannel's nlohmann/json submodule on Windows.
+      # That checkout contains test-report paths exceeding MAX_PATH; Git for Windows
+      # needs an explicit opt-in even when the CMake build uses the short O: drive.
+      - name: Enable Git long paths for Windows dependencies
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          git config --global core.longpaths true
+          if ($LASTEXITCODE -ne 0) { throw 'Could not configure Git long-path support' }
+          $value = (git config --get core.longpaths).Trim()
+          if ($LASTEXITCODE -ne 0 -or $value -ne 'true') {
+            throw "Git long-path support not enabled: $value"
+          }
+          # Pass through every CMake-spawned git clone/submodule process, including
+          # subprocesses whose HOME or local git config differs from this step.
+          'GIT_CONFIG_COUNT=1' | Out-File -Append -FilePath $env:GITHUB_ENV -Encoding utf8
+          'GIT_CONFIG_KEY_0=core.longpaths' | Out-File -Append -FilePath $env:GITHUB_ENV -Encoding utf8
+          'GIT_CONFIG_VALUE_0=true' | Out-File -Append -FilePath $env:GITHUB_ENV -Encoding utf8
+          Write-Host 'Git long-path support enabled and exported to dependency subprocesses'
+
       - name: load cached deps
         uses: actions/cache@v6
         with:
@@ -118,35 +153,15 @@ jobs:
         if: runner.os == 'Windows'
         working-directory: ${{ github.workspace }}
         run: |
-            # Git checks out third-party submodules in deeply nested dependency directories.
-            # Enable Windows long-path handling before CMake downloads dep_DataChannel.
-            git config --global core.longpaths true
             if (-not "${{ vars.SELF_HOSTED }}") {
               choco install strawberryperl
             }
             # cache-path is the install directory inside the deps build directory.
-            $deps = (Split-Path "${{ github.workspace }}/${{ inputs.cache-path }}").Replace('\', '/')
+            $deps = (Split-Path "O:/${{ inputs.cache-path }}").Replace('\', '/')
             # -l compiles with Visual Studio's clang-cl and -x builds with Ninja; --msvc --msbuild is cl under the Visual Studio generator.
             $flags = if ("${{ inputs.compiler }}" -eq "clang") { "-l", "-x" } else { "--msvc", "--msbuild" }
-            $buildScript = ".\build_win.bat"
-            # OCCT generates paths too long for MSVC on both hosted Windows architectures.
-            # Subst shortens compiler-visible paths without changing the cached files.
-            $mappedDrive = $false
-            if (-not "${{ vars.SELF_HOSTED }}") {
-              $drive = "O:"
-              & subst.exe $drive "${{ github.workspace }}"
-              if ($LASTEXITCODE -ne 0) { throw "Could not map short build path $drive" }
-              $mappedDrive = $true
-              $deps = ("${drive}/" + (Split-Path "${{ inputs.cache-path }}" -Parent)).Replace('\', '/')
-              $buildScript = "${drive}\build_win.bat"
-            }
-            try {
-              & $buildScript -d --arch ${{ inputs.arch }} --deps-dir $deps @flags
-              $buildExitCode = $LASTEXITCODE
-            } finally {
-              if ($mappedDrive) { & subst.exe $drive /D }
-            }
-            if ($buildExitCode -ne 0) { exit $buildExitCode }
+            Set-Location 'O:\'
+            .\build_win.bat -d --arch ${{ inputs.arch }} --deps-dir $deps @flags
         shell: pwsh
 
       - name: Build on Mac ${{ inputs.arch }}

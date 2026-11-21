@@ -1,19 +1,17 @@
 # clang-cl cannot emit some OCCT sources for ARM64 (llvm/llvm-project#62081), and with OCCT's
 # precompiled headers it can break exception copies (llvm/llvm-project#53486). cl and clang-cl
-# share an ABI, so clang-cl builds compile OCCT with cl. The Visual Studio generator picks the
-# compiler by toolset, so there OCCT may stay on clang-cl; keep precompiled headers off there.
+# share an ABI, so clang-cl builds compile OCCT with cl where supported.
+# Windows CI has also hit MSVC C1083 on TKGeomAlgo's very long generated object paths
+# with /Yu and /Fp. Combine the Windows short workspace path used by the workflows
+# with PCH disabled for OCCT only; leave other platforms' OCCT PCH unchanged.
 set(_occt_compiler_args "")
+set(_occt_pch ON)
 if (WIN32)
     set(_occt_pch OFF)
-else ()
-    set(_occt_pch ON)
 endif ()
 if (MSVC AND CMAKE_CXX_COMPILER_ID STREQUAL "Clang")
     if ("${DEPS_ARCH}" STREQUAL "arm64" OR NOT CMAKE_GENERATOR MATCHES "Visual Studio")
         set(_occt_compiler_args -DCMAKE_C_COMPILER:STRING=cl -DCMAKE_CXX_COMPILER:STRING=cl)
-    endif ()
-    if (CMAKE_GENERATOR MATCHES "Visual Studio")
-        set(_occt_pch OFF)
     endif ()
 endif ()
 
@@ -54,9 +52,11 @@ orcaslicer_add_cmake_project(OCCT
     URL_HASH SHA256=7c033d917ee8f040c0512d289dcc5f02c148889d5bac17c3e25639accb44f0da
     # Makes BRepMesh triangulate cone faces whose seam pcurve is slightly tilted
     # (Open-Cascade-SAS/OCCT#572); remove the patch once an OCCT release includes the fix.
+    # 0002 compiles one file without optimization under cl for ARM64, where MSVC 14.52 crashes
+    # on it with an internal compiler error; remove it once the runner image ships a fixed MSVC.
     PATCH_COMMAND git apply ${OCCT_DIRECTORY_FLAG} --verbose --ignore-space-change --whitespace=fix
         ${CMAKE_CURRENT_LIST_DIR}/0001-BRepMesh-seam-pcurve-at-edge-parameter.patch
-        ${CMAKE_CURRENT_LIST_DIR}/0002-msvc-arm64-owner-kind-optimizer.patch
+        ${CMAKE_CURRENT_LIST_DIR}/0002-BRepGraph-MSVC-ARM64-ICE-workaround.patch
     #DEPENDS dep_Boost
     CMAKE_ARGS
         -DCMAKE_CXX_STANDARD=17

@@ -18,6 +18,7 @@
 
 #include <boost/log/trivial.hpp>
 #include <boost/filesystem/path.hpp>
+#include <boost/format.hpp>
 
 #include <nlohmann/json.hpp>
 

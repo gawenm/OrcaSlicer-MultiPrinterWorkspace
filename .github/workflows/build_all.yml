@@ -5,7 +5,6 @@ on:
     branches:
      - main
      - release/*
-     - review/orca-mpw-v2.5.0
     paths:
      - 'deps/**'
      - 'deps_src/**'
@@ -16,7 +15,6 @@ on:
      - 'localization/**'
      - 'resources/**'
      - ".github/workflows/build_*.yml"
-     - "!.github/workflows/build_*_mpw.yml"
      - ".github/workflows/unit_tests*.yml"
      - 'build_linux.sh'
      - 'build_win.bat'
@@ -69,16 +67,6 @@ on:
         description: 'Only build dependencies (bypasses caching)'
         type: boolean
         default: false
-      target-platform:
-        description: 'Select a platform for a focused CI retry; push builds still run all platforms'
-        type: choice
-        default: all
-        options:
-          - all
-          - linux
-          - windows
-          - macos
-          - flatpak
 
 concurrency:
   # cancel_closed_pr_builds.yml joins this group by name, so update that file
@@ -156,63 +144,22 @@ jobs:
           && '[{"arch":"","os":"orca-lnx-server"}]'
           || '[{"arch":"","os":"ubuntu-24.04"},{"arch":"aarch64","os":"ubuntu-24.04-arm"}]') }}
     # Don't run scheduled builds on forks:
-    if: ${{ !cancelled() && (github.event_name != 'schedule' || github.repository == 'OrcaSlicer/OrcaSlicer') && (github.event_name != 'workflow_dispatch' || inputs.target-platform == 'all' || inputs.target-platform == 'linux') }}
+    if: ${{ !cancelled() && (github.event_name != 'schedule' || github.repository == 'OrcaSlicer/OrcaSlicer') }}
     uses: ./.github/workflows/build_check_cache.yml
     with:
       os: ${{ matrix.os }}
       arch: ${{ matrix.arch }}
       build-deps-only: ${{ inputs.build-deps-only || false }}
     secrets: inherit
-  package_mpw_linux:
-    name: Package MPW for Arch and Debian
-    needs: build_linux
-    if: ${{ !cancelled() && needs.build_linux.result == 'success' && github.repository == 'gawenm/OrcaSlicer-MultiPrinterWorkspace' && (github.event_name == 'workflow_dispatch' || github.ref == 'refs/heads/review/orca-mpw-v2.5.0') && !inputs.build-deps-only }}
-    runs-on: ubuntu-24.04
-    permissions:
-      contents: read
-    steps:
-      - uses: actions/checkout@v7
-      - uses: actions/download-artifact@v8
-        with:
-          pattern: OrcaSlicer_Linux_ubuntu_*
-          path: appimages
-      - name: Build native Linux packages
-        shell: bash
-        run: |
-          set -euo pipefail
-          sudo apt-get update
-          sudo apt-get install -y zstd
-          mapfile -t images < <(find appimages -type f -name '*.AppImage' ! -name '*aarch64*')
-          if (( ${#images[@]} != 1 )); then
-            echo 'Expected exactly one x86-64 AppImage.' >&2
-            exit 1
-          fi
-          version=$(sed -nE 's/^set\(SoftFever_VERSION "([0-9]+\.[0-9]+\.[0-9]+)[^"]*"\)$/\1/p' version.inc)
-          bash scripts/package_mpw_linux.sh "${images[0]}" "$version" "$GITHUB_RUN_NUMBER" dist
-      - uses: actions/upload-artifact@v7
-        with:
-          name: Orca-MPW-Arch-x86_64
-          path: dist/*.pkg.tar.zst
-          if-no-files-found: error
-      - uses: actions/upload-artifact@v7
-        with:
-          name: Orca-MPW-Debian-amd64
-          path: dist/*.deb
-          if-no-files-found: error
-
   build_windows:
     name: Build Windows ${{ matrix.arch }}
     strategy:
       fail-fast: false
-      # SELF_HOSTED skips arm64 (the self-hosted Windows server is x64-only).
-      # So does a pull request; build_optional.yml builds arm64 on the
-      # build-windows-arm64 label or a change outside the sources.
+      # Windows builds target x64 only; Linux aarch64/macOS ARM64 remain enabled.
       matrix:
         include: ${{ fromJSON(vars.SELF_HOSTED
           && '[{"arch":"x64","os":"orca-win-server","compiler":"clang"}]'
-          || (github.event_name == 'pull_request'
-            && '[{"arch":"x64","os":"windows-latest","compiler":"clang"}]'
-            || '[{"arch":"x64","os":"windows-latest","compiler":"clang"},{"arch":"arm64","os":"windows-11-vs2026-arm","compiler":"clang"}]')) }}
+          || '[{"arch":"x64","os":"windows-latest","compiler":"clang"}]') }}
     needs: check_build_script
     # id-token lets release builds sign through Google Cloud Workload Identity Federation (see
     # "Configure code signing" in build_orca.yml); the rest is what the build already used.
@@ -221,7 +168,7 @@ jobs:
       contents: write
       id-token: write
     # Don't run scheduled builds on forks:
-    if: ${{ !cancelled() && contains(fromJSON('["success", "skipped"]'), needs.check_build_script.result) && (github.event_name != 'schedule' || github.repository == 'OrcaSlicer/OrcaSlicer') && (github.event_name != 'workflow_dispatch' || inputs.target-platform == 'all' || inputs.target-platform == 'windows') }}
+    if: ${{ !cancelled() && contains(fromJSON('["success", "skipped"]'), needs.check_build_script.result) && (github.event_name != 'schedule' || github.repository == 'OrcaSlicer/OrcaSlicer') }}
     uses: ./.github/workflows/build_check_cache.yml
     with:
       os: ${{ matrix.os }}
@@ -239,12 +186,10 @@ jobs:
       matrix:
         arch: ${{ fromJSON(github.event_name == 'pull_request' && '["arm64"]' || '["arm64", "x86_64"]') }}
     # Don't run scheduled builds on forks:
-    if: ${{ !cancelled() && (github.event_name != 'schedule' || github.repository == 'OrcaSlicer/OrcaSlicer') && (github.event_name != 'workflow_dispatch' || inputs.target-platform == 'all' || inputs.target-platform == 'macos') }}
+    if: ${{ !cancelled() && (github.event_name != 'schedule' || github.repository == 'OrcaSlicer/OrcaSlicer') }}
     uses: ./.github/workflows/build_check_cache.yml
     with:
-      # Intel and Apple Silicon use different hosted runner labels. This
-      # avoids scheduling the Intel build on a scarce ARM64 runner.
-      os: ${{ vars.SELF_HOSTED && 'orca-macos-arm64' || (matrix.arch == 'x86_64' && 'macos-15-intel' || 'macos-15') }}
+      os: ${{ vars.SELF_HOSTED && 'orca-macos-arm64' || 'macos-15' }}
       arch: ${{ matrix.arch }}
       build-deps-only: ${{ inputs.build-deps-only || false }}
       force-build: ${{ github.event_name == 'schedule' }}
@@ -285,15 +230,6 @@ jobs:
     with:
       os: ${{ vars.SELF_HOSTED && 'orca-win-server' || 'windows-latest' }}
       artifact: ${{ github.sha }}-tests-windows-x64
-  unit_tests_windows_arm64:
-    name: Windows arm64
-    needs: build_windows
-    if: ${{ !cancelled() && needs.build_windows.result == 'success' && !vars.SELF_HOSTED && github.event_name != 'pull_request' }}
-    uses: ./.github/workflows/unit_tests.yml
-    with:
-      os: windows-11-vs2026-arm
-      artifact: ${{ github.sha }}-tests-windows-arm64
-      test-dir: build-arm64/tests
   unit_tests_macos_arm64:
     name: macOS arm64
     needs: build_macos_arch
@@ -331,8 +267,8 @@ jobs:
           ./validator-bin/OrcaSlicer_profile_validator -p "${{ github.workspace }}/resources/profiles" -s -l 2
   publish_test_results:
     name: Publish Test Results
-    needs: [unit_tests_linux_x86_64, unit_tests_linux_aarch64, unit_tests_windows_x64, unit_tests_windows_arm64, unit_tests_macos_arm64, flatpak]
-    if: ${{ !cancelled() && (needs.unit_tests_linux_x86_64.result != 'skipped' || needs.unit_tests_linux_aarch64.result != 'skipped' || needs.unit_tests_windows_x64.result != 'skipped' || needs.unit_tests_windows_arm64.result != 'skipped' || needs.unit_tests_macos_arm64.result != 'skipped' || needs.flatpak.result != 'skipped') }}
+    needs: [unit_tests_linux_x86_64, unit_tests_linux_aarch64, unit_tests_windows_x64, unit_tests_macos_arm64, flatpak]
+    if: ${{ !cancelled() }}
     runs-on: ubuntu-latest
     steps:
       - name: Download Test Results
@@ -342,7 +278,9 @@ jobs:
           path: test-results
       # Best-effort: a read-only token (e.g. fork PRs) can't write the check, so
       # don't let a publish failure fail the run. The test jobs gate correctness.
+      # Skipped when every build failed: there is nothing to publish.
       - name: Publish Test Results
+        if: ${{ hashFiles('test-results/**/*.xml') != '' }}
         continue-on-error: true
         uses: EnricoMi/publish-unit-test-result-action@v2
         with:
@@ -357,6 +295,8 @@ jobs:
   flatpak:
     name: Flatpak
     # Don't run scheduled builds on forks; skip entirely on self-hosted runners
-    if: ${{ !cancelled() && !vars.SELF_HOSTED && github.event_name != 'pull_request' && (github.event_name != 'schedule' || github.repository == 'OrcaSlicer/OrcaSlicer') && (github.event_name != 'workflow_dispatch' || inputs.target-platform == 'all' || inputs.target-platform == 'flatpak') }}
+    if: ${{ !cancelled() && !vars.SELF_HOSTED && github.event_name != 'pull_request' && (github.event_name != 'schedule' || github.repository == 'OrcaSlicer/OrcaSlicer') }}
     uses: ./.github/workflows/build_flatpak.yml
     secrets: inherit
+
+# MPW full upstream build matrix validation trigger (2026-11-15)

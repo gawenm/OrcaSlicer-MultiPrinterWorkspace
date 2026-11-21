@@ -739,10 +739,7 @@ void ArrangeJob::process(Ctl &ctl)
     if (is_bbl && params.avoid_extrusion_cali_region && global_config.opt_bool("scan_first_layer"))
         partplate_list.preprocess_nonprefered_areas(m_unselected, MAX_NUM_PLATES);
 
-    update_arrange_params(params, arrange_config, m_selected);
-    update_selected_items_inflation(m_selected, arrange_config, params);
-    update_unselected_items_inflation(m_unselected, arrange_config, params);
-    update_selected_items_axis_align(m_selected, arrange_config, params);
+    update_arrange_items(m_selected, m_unselected, arrange_config, params);
 
     Points bedpts = get_shrink_bedpts(arrange_config, params);
 
