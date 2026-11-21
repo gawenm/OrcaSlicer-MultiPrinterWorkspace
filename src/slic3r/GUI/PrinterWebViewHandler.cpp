@@ -56,14 +56,6 @@ wxWebView* PrinterWebViewHandler::browser() const
 
 namespace {
 
-DynamicPrintConfig* get_active_printer_config()
-{
-    if (wxGetApp().preset_bundle == nullptr)
-        return nullptr;
-
-    return &wxGetApp().preset_bundle->printers.get_edited_preset().config;
-}
-
 std::string json_string(const json& node, const char* key)
 {
     auto it = node.find(key);
@@ -98,8 +90,9 @@ std::string filename_to_utf8(const boost::filesystem::path& path)
 
 class ElegooPrinterWebViewHandler final : public PrinterWebViewHandler {
 public:
-    explicit ElegooPrinterWebViewHandler(PrinterWebView& owner)
+    ElegooPrinterWebViewHandler(PrinterWebView& owner, const DynamicPrintConfig& config)
         : PrinterWebViewHandler(owner)
+        , m_config(config)
     {
     }
 
@@ -215,8 +208,7 @@ private:
         if (file_name.empty())
             file_name = filename_to_utf8(source_path);
 
-        DynamicPrintConfig* config = get_active_printer_config();
-        std::unique_ptr<PrintHost> print_host(config == nullptr ? nullptr : PrintHost::get_print_host(config));
+        std::unique_ptr<PrintHost> print_host(PrintHost::get_print_host(&m_config));
         if (print_host == nullptr) {
             upload_in_progress = false;
             send_ipc_message("response", request_id, method, 1, "Could not get a valid Printer Host reference");
@@ -298,15 +290,14 @@ private:
         // Panel always calls get_sn with a 10s IPC timeout. Answer immediately from
         // dev_sn / cache — do not spawn a thread or perform HTTP (panel uses URL sn on miss).
         std::string sn;
-        if (DynamicPrintConfig* config = get_active_printer_config()) {
-            const std::unique_ptr<PrintHost> host(PrintHost::get_print_host(config));
-            if (host)
-                sn = host->get_sn();
-        }
+        const std::unique_ptr<PrintHost> host(PrintHost::get_print_host(&m_config));
+        if (host)
+            sn = host->get_sn();
         json data = { { "sn", sn } };
         send_ipc_message("response", request_id, method, 0, "success", dump_json(data));
     }
 
+    DynamicPrintConfig m_config;
     std::atomic<bool> upload_in_progress { false };
     std::atomic<bool> stop_upload { false };
     std::thread       upload_thread;
@@ -314,19 +305,12 @@ private:
 
 } // namespace
 
-std::unique_ptr<PrinterWebViewHandler> create_printer_webview_handler(PrinterWebView& owner)
+std::unique_ptr<PrinterWebViewHandler> create_printer_webview_handler(PrinterWebView& owner, const DynamicPrintConfig* config)
 {
-    auto     cfg = get_active_printer_config();
-    if(cfg == nullptr) return nullptr;
-    
-    const auto host_type = cfg->option<ConfigOptionEnum<PrintHostType>>("host_type")->value;
-    switch (host_type)
-    {
-        case PrintHostType::htElegooLink:
-            return std::make_unique<ElegooPrinterWebViewHandler>(owner);
-        default:
-            return nullptr;
-    }
+    const auto* host_type = config ? config->option<ConfigOptionEnum<PrintHostType>>("host_type") : nullptr;
+    if (host_type && host_type->value == htElegooLink)
+        return std::make_unique<ElegooPrinterWebViewHandler>(owner, *config);
+    return nullptr;
 }
 
 } // GUI

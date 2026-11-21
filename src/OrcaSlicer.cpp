@@ -1787,6 +1787,14 @@ int CLI::run(int argc, char **argv)
                 //LoadStrategy strategy = LoadStrategy::LoadModel | LoadStrategy::LoadConfig|LoadStrategy::AddDefaultInstances;
                 //if (load_aux) strategy = strategy | LoadStrategy::LoadAuxiliary;
                 model = Model::read_from_file(file, &config, &config_substitutions, strategy, &plate_data_src, &project_presets, &is_bbl_3mf, &file_version, nullptr, nullptr, nullptr, plate_to_slice);
+                if (std::any_of(plate_data_src.begin(), plate_data_src.end(), [](const PlateData* plate) {
+                        return plate && plate->printer_profile.assigned();
+                    })) {
+                    const char* message = "This project uses per-plate printer profiles. Open and slice it in the OrcaSlicer GUI.";
+                    boost::nowide::cerr << message << '\n';
+                    record_exit_reson(outfile_dir, CLI_INVALID_PARAMS, 0, message, sliced_info);
+                    flush_and_exit(CLI_INVALID_PARAMS);
+                }
                 if (is_bbl_3mf)
                 {
                     if (!first_file)

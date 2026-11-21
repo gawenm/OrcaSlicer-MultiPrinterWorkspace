@@ -407,6 +407,70 @@ static constexpr const char* INSTANCEID_ATTR = "instance_id";
 static constexpr const char* IDENTIFYID_ATTR = "identify_id";
 static constexpr const char* PLATERID_ATTR = "plater_id";
 static constexpr const char* PLATER_NAME_ATTR = "plater_name";
+static constexpr const char* PLATE_PRINTER_ORIGIN_ATTR = "orca_plate_layout_origin_v1";
+static constexpr const char* PLATE_PRINTER_PROFILE_ATTR = "orca_plate_printer_profile_v1";
+
+namespace Slic3r {
+
+bool PlatePrinterProfile::valid() const
+{
+    const auto* technology = config.option("printer_technology");
+    const auto* name = config.option<ConfigOptionString>("printer_settings_id");
+    const auto* area = config.option<ConfigOptionPoints>("printable_area");
+    const auto* height = config.option<ConfigOptionFloat>("printable_height");
+    const auto* nozzles = config.option<ConfigOptionFloats>("nozzle_diameter");
+    const auto* filaments = config.option<ConfigOptionStrings>("filament_type");
+    return technology && technology->getInt() == ptFFF && name && !name->value.empty() &&
+           area && area->values.size() >= 3 &&
+           std::all_of(area->values.begin(), area->values.end(), [](const Vec2d& point) { return point.allFinite(); }) &&
+           height && std::isfinite(height->value) && height->value > 0 &&
+           nozzles && !nozzles->values.empty() &&
+           std::all_of(nozzles->values.begin(), nozzles->values.end(), [](double diameter) { return std::isfinite(diameter) && diameter > 0; }) &&
+           filaments && !filaments->values.empty();
+}
+
+void PlatePrinterProfile::remove_local_settings()
+{
+    // Post-processing commands and host credentials belong to the local installation.
+    for (const char* key : {"print_host", "print_host_webui", "printhost_apikey", "printhost_cafile",
+                            "printhost_user", "printhost_password", "printhost_port", "post_process"})
+        config.erase(key);
+}
+
+static std::string encode_plate_printer_profile(PlatePrinterProfile profile)
+{
+    profile.remove_local_settings();
+    nlohmann::json options = nlohmann::json::object();
+    for (const auto& key : profile.config.keys())
+        options[key] = profile.config.option(key)->serialize();
+    return nlohmann::json{{"bambu", profile.is_bambu}, {"config", std::move(options)}}.dump();
+}
+
+static PlatePrinterProfile decode_plate_printer_profile(const std::string& value)
+{
+    const auto data = nlohmann::json::parse(value);
+    const auto& options = data.at("config");
+    if (!options.is_object())
+        throw std::invalid_argument("Invalid plate printer configuration");
+
+    PlatePrinterProfile profile;
+    profile.is_bambu = data.at("bambu").get<bool>();
+    ConfigSubstitutionContext substitutions{ForwardCompatibilitySubstitutionRule::Disable};
+    for (auto it = options.begin(); it != options.end(); ++it) {
+        if (print_config_def.get(it.key()))
+            profile.config.set_deserialize(it.key(), it.value().get<std::string>(), substitutions);
+    }
+    if (!profile.valid())
+        throw std::invalid_argument("Incomplete plate printer configuration");
+    DynamicPrintConfig defaults;
+    defaults.apply(FullPrintConfig::defaults());
+    defaults.apply(profile.config);
+    profile.config = std::move(defaults);
+    profile.remove_local_settings();
+    return profile;
+}
+
+} // namespace Slic3r
 static constexpr const char* PLATE_IDX_ATTR = "index";
 static constexpr const char* PRINTER_MODEL_ID_ATTR = "printer_model_id";
 static constexpr const char* EXTRUDER_TYPE_ATTR = "extruder_type";
@@ -1771,6 +1835,8 @@ void PlateData::parse_filament_info(GCodeProcessorResult *result)
             plate->pick_file = it->second->pick_file;
             plate->pattern_bbox_file = it->second->pattern_bbox_file;
             plate->config = it->second->config;
+            plate->printer_profile = std::move(it->second->printer_profile);
+            plate->printer_profile_origin = it->second->printer_profile_origin;
 
             if (!plate->thumbnail_file.empty())
                 _extract_from_archive(archive, plate->thumbnail_file, [&pixels = plate_data_list[it->first - 1]->plate_thumbnail.pixels](auto &archive, auto const &stat) -> bool {
@@ -2478,6 +2544,8 @@ void PlateData::parse_filament_info(GCodeProcessorResult *result)
             plate_data_list[it->first-1]->pick_file = (m_load_restore || it->second->pick_file.empty()) ? it->second->pick_file : m_backup_path + "/" + it->second->pick_file;
             plate_data_list[it->first-1]->pattern_bbox_file = (m_load_restore || it->second->pattern_bbox_file.empty()) ? it->second->pattern_bbox_file : m_backup_path + "/" + it->second->pattern_bbox_file;
             plate_data_list[it->first-1]->config = it->second->config;
+            plate_data_list[it->first-1]->printer_profile = std::move(it->second->printer_profile);
+            plate_data_list[it->first-1]->printer_profile_origin = it->second->printer_profile_origin;
 
             current_plate_data = plate_data_list[it->first - 1];
             BOOST_LOG_TRIVIAL(info) << __FUNCTION__ << ":" << __LINE__ << boost::format(", plate %1%, thumbnail_file=%2%, no_light_thumbnail_file=%3%")%it->first %plate_data_list[it->first-1]->thumbnail_file %plate_data_list[it->first-1]->no_light_thumbnail_file;
@@ -4652,6 +4720,31 @@ void PlateData::parse_filament_info(GCodeProcessorResult *result)
             }
             else if (key == PLATER_NAME_ATTR) {
                 m_curr_plater->plate_name = xml_unescape(value.c_str());
+            }
+            else if (key == PLATE_PRINTER_ORIGIN_ATTR && m_curr_plater) {
+                std::istringstream coordinates(value);
+                coordinates.imbue(std::locale::classic());
+                double x, y;
+                if (!(coordinates >> x >> y) || !std::isfinite(x) || !std::isfinite(y)) {
+                    add_error("Invalid plate layout origin");
+                    return false;
+                }
+                m_curr_plater->printer_profile_origin = Vec2d(x, y);
+            }
+            else if (boost::starts_with(key, "orca_plate_printer_profile_")) {
+                if ((m_load_config || m_parsing_slice_info) && m_curr_plater) {
+                    if (key != PLATE_PRINTER_PROFILE_ATTR) {
+                        add_error("Unsupported plate printer profile version");
+                        return false;
+                    }
+                    try {
+                        // Expat has already decoded the XML attribute entities.
+                        m_curr_plater->printer_profile = decode_plate_printer_profile(value);
+                    } catch (const std::exception& error) {
+                        add_error(std::string("Could not read a plate printer profile: ") + error.what());
+                        return false;
+                    }
+                }
             }
             else if (key == LOCK_ATTR)
             {
@@ -8523,6 +8616,16 @@ bool _BBS_3MF_Exporter::_add_model_config_file_to_archive(mz_zip_archive& archiv
                 stream << "    <" << METADATA_TAG << " " << KEY_ATTR << "=\"" << PLATERID_ATTR << "\" " << VALUE_ATTR << "=\"" << plate_data->plate_index + 1 << "\"/>\n";
                 stream << "    <" << METADATA_TAG << " " << KEY_ATTR << "=\"" << PLATER_NAME_ATTR << "\" " << VALUE_ATTR << "=\"" <<  xml_escape(plate_data->plate_name.c_str()) << "\"/>\n";
                 stream << "    <" << METADATA_TAG << " " << KEY_ATTR << "=\"" << LOCK_ATTR << "\" " << VALUE_ATTR << "=\"" << std::boolalpha<< plate_data->locked<< "\"/>\n";
+                if (plate_data->printer_profile_origin && !m_minimal_published) {
+                    const Vec2d& origin = *plate_data->printer_profile_origin;
+                    stream << "    <" << METADATA_TAG << " " << KEY_ATTR << "=\"" << PLATE_PRINTER_ORIGIN_ATTR
+                           << "\" " << VALUE_ATTR << "=\"" << origin.x() << ' ' << origin.y() << "\"/>\n";
+                }
+                if (plate_data->printer_profile.assigned() && !m_minimal_published) {
+                    stream << "    <" << METADATA_TAG << " " << KEY_ATTR << "=\"" << PLATE_PRINTER_PROFILE_ATTR
+                           << "\" " << VALUE_ATTR << "=\""
+                           << xml_escape_double_quotes_attribute_value(encode_plate_printer_profile(plate_data->printer_profile)) << "\"/>\n";
+                }
                 ConfigOption* bed_type_opt = plate_data->config.option("curr_bed_type");
                 t_config_enum_names bed_type_names = ConfigOptionEnum<BedType>::get_enum_names();
                 if (bed_type_opt != nullptr && bed_type_names.size() > bed_type_opt->getInt())

@@ -10,6 +10,8 @@ class wxWebViewEvent;
 class wxWebView;
 
 namespace Slic3r {
+class DynamicPrintConfig;
+
 namespace GUI {
 
 class PrinterWebView;
@@ -30,7 +32,7 @@ private:
     PrinterWebView& m_owner;
 };
 
-std::unique_ptr<PrinterWebViewHandler> create_printer_webview_handler(PrinterWebView& owner);
+std::unique_ptr<PrinterWebViewHandler> create_printer_webview_handler(PrinterWebView& owner, const DynamicPrintConfig* config);
 
 } // GUI
 } // Slic3r

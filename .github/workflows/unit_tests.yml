@@ -59,6 +59,13 @@ jobs:
           New-ItemProperty -Path $key -Name DumpFolder -PropertyType ExpandString -Value "$env:RUNNER_TEMP\crash-dumps" -Force | Out-Null
           New-ItemProperty -Path $key -Name DumpType -PropertyType DWord -Value 2 -Force | Out-Null
           New-ItemProperty -Path $key -Name DumpCount -PropertyType DWord -Value 5 -Force | Out-Null
+      # CTest records the O:/ path used by hosted Windows builds. Recreate it on the test runner.
+      - name: Restore hosted Windows build path for CTest
+        if: ${{ runner.os == 'Windows' && !vars.SELF_HOSTED }}
+        shell: pwsh
+        run: |
+          & subst.exe O: "${{ github.workspace }}"
+          if ($LASTEXITCODE -ne 0) { throw "Failed to restore O: build path" }
       - name: Unpackage and Run Unit Tests
         timeout-minutes: 20
         shell: bash

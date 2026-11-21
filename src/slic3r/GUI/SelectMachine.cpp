@@ -93,6 +93,8 @@
 #include <cstring>
 #include "libslic3r/PrintBase.hpp"
 #include "slic3r/GUI/PartPlate.hpp"
+#include "PlatePrintContext.hpp"
+#include "slic3r/Utils/MoonrakerPrinterAgent.hpp"
 #include "slic3r/GUI/3DScene.hpp"
 #include <wx/image.h>
 #include <wx/dcmemory.h>
@@ -1224,8 +1226,8 @@ bool SelectMachineDialog::do_ams_mapping(MachineObject *obj_,bool use_ams)
     obj_->get_ams_colors(m_cur_colors_in_thumbnail);
     // try color and type mapping
 
-    const auto& full_config = wxGetApp().preset_bundle->full_config();
-    const auto& project_config = wxGetApp().preset_bundle->project_config;
+    const auto& full_config = print_full_config();
+    const auto& project_config = print_project_config();
     size_t nozzle_nums = full_config.option<ConfigOptionFloats>("nozzle_diameter")->values.size();
 
     if (m_print_type == FROM_NORMAL) {
@@ -1386,7 +1388,8 @@ bool SelectMachineDialog::get_ams_mapping_result(std::string &mapping_array_str,
             if (plater) {
                 PartPlate *curr_plate = plater->get_partplate_list().get_curr_plate();
                 if (curr_plate) {
-                    filament_maps = curr_plate->get_filament_maps();
+                    filament_maps = m_plate_print_config.empty() ? curr_plate->get_filament_maps() :
+                        curr_plate->get_real_filament_maps(m_plate_print_config);
                 } else {
                     BOOST_LOG_TRIVIAL(error) << "get_ams_mapping_result, curr_plate is nullptr";
                 }
@@ -1394,7 +1397,8 @@ bool SelectMachineDialog::get_ams_mapping_result(std::string &mapping_array_str,
                 BOOST_LOG_TRIVIAL(error) << "get_ams_mapping_result, plater is nullptr";
             }
 
-            for (int i = 0; i < wxGetApp().preset_bundle->filament_presets.size(); i++) {
+            const auto* plate_filament_ids = m_plate_print_config.option<ConfigOptionStrings>("filament_ids");
+            for (int i = 0; i < print_filament_count(); i++) {
                 int  tray_id = -1;
                 json mapping_item_v1;
                 mapping_item_v1["ams_id"]  = 0xff;
@@ -1409,7 +1413,10 @@ bool SelectMachineDialog::get_ams_mapping_result(std::string &mapping_array_str,
                         tray_id                      = m_ams_mapping_result[k].tray_id;
                         mapping_item["ams"]          = tray_id;
                         mapping_item["filamentType"] = m_filaments[k].type;
-                        if (i >= 0 && i < wxGetApp().preset_bundle->filament_presets.size()) {
+                        if (!m_plate_print_config.empty()) {
+                            if (plate_filament_ids && size_t(i) < plate_filament_ids->values.size())
+                                mapping_item["filamentId"] = plate_filament_ids->values[i];
+                        } else {
                             auto it = wxGetApp().preset_bundle->filaments.find_preset(wxGetApp().preset_bundle->filament_presets[i]);
                             if (it != nullptr) { mapping_item["filamentId"] = it->filament_id; }
                         }
@@ -1481,12 +1488,14 @@ bool SelectMachineDialog::build_nozzles_info(std::string& nozzles_info)
     PresetBundle* preset_bundle = wxGetApp().preset_bundle;
     if (!preset_bundle)
         return false;
-    auto opt_nozzle_diameters = preset_bundle->printers.get_edited_preset().config.option<ConfigOptionFloats>("nozzle_diameter");
+    const auto& printer_config = m_plate_print_config.empty() ?
+        preset_bundle->printers.get_edited_preset().config : m_plate_print_config;
+    auto opt_nozzle_diameters = printer_config.option<ConfigOptionFloats>("nozzle_diameter");
     if (opt_nozzle_diameters == nullptr) {
         BOOST_LOG_TRIVIAL(error) << "build_nozzles_info, opt_nozzle_diameters is nullptr";
         return false;
     }
-    auto opt_nozzle_volume_type = preset_bundle->project_config.option<ConfigOptionEnumsGeneric>("nozzle_volume_type");
+    auto opt_nozzle_volume_type = print_project_config().option<ConfigOptionEnumsGeneric>("nozzle_volume_type");
     if (opt_nozzle_volume_type == nullptr) {
         BOOST_LOG_TRIVIAL(error) << "build_nozzles_info, opt_nozzle_volume_type is nullptr";
         return false;
@@ -1529,7 +1538,7 @@ bool SelectMachineDialog::can_hybrid_mapping(MachineObject* obj_) const {
 ShowType SelectMachineDialog::get_filament_mapping_show_type(MachineObject* obj_, int fila_logic_id) const
 {
     try {
-        const auto& full_config = wxGetApp().preset_bundle->full_config();
+        const auto& full_config = print_full_config();
         size_t total_ext_count = full_config.option<ConfigOptionFloats>("nozzle_diameter")->values.size();
         if (total_ext_count < 2) {
             return ShowType::RIGHT;
@@ -1600,7 +1609,7 @@ std::map<int, DevNozzle> SelectMachineDialog::get_mapped_nozzles(int fila_id) co
 
     int total_ext_count = 0;
     if (m_print_type == FROM_NORMAL) {
-        const auto& full_config = wxGetApp().preset_bundle->full_config();
+        const auto& full_config = print_full_config();
         const auto  opt         = full_config.option<ConfigOptionFloats>("nozzle_diameter");
         total_ext_count         = opt ? opt->values.size() : 0;
     } else {
@@ -1699,7 +1708,7 @@ bool SelectMachineDialog::slicing_with_fila_switch() const
         return true;
 
     if (m_print_type == FROM_NORMAL) {
-        auto has_filament_switcher = wxGetApp().preset_bundle->project_config.option<ConfigOptionBool>("has_filament_switcher");
+        auto has_filament_switcher = print_project_config().option<ConfigOptionBool>("has_filament_switcher");
         if (has_filament_switcher)
             return has_filament_switcher->value;
     } else if (m_print_type == FROM_SDCARD_VIEW) {
@@ -1987,6 +1996,48 @@ bool SelectMachineDialog::is_selected_ams_drying(MachineObject* obj)
 void SelectMachineDialog::prepare(int print_plate_idx)
 {
     m_print_plate_idx = print_plate_idx;
+    m_plate_print_config.clear();
+    m_plate_agent_id.clear();
+    m_print_plate_id = {};
+    m_plate_device_id.clear();
+    if (m_print_type == FROM_NORMAL && print_plate_idx >= 0) {
+        auto& plates = m_plater->get_partplate_list();
+        PartPlate* plate = plates.get_plate(print_plate_idx);
+        auto& bundle = *wxGetApp().preset_bundle;
+        if (plate && plates.has_printer_profiles()) {
+            m_print_plate_id = plate->id();
+            m_plate_agent_id = plate_printer_agent_id(plate, bundle);
+            if (plate->printer_profile().assigned()) {
+                m_plate_print_config = plate->build_print_config(bundle);
+                const auto* config = plate_print_host_config(plate, bundle);
+                if (config && m_plate_agent_id != BBL_PRINTER_AGENT_ID)
+                    m_plate_device_id = plate_print_host_device_id(*config);
+            }
+        }
+    }
+}
+
+DynamicPrintConfig SelectMachineDialog::print_full_config() const
+{
+    return m_plate_print_config.empty() ? wxGetApp().preset_bundle->full_config() : m_plate_print_config;
+}
+
+const DynamicPrintConfig& SelectMachineDialog::print_project_config() const
+{
+    return m_plate_print_config.empty() ? wxGetApp().preset_bundle->project_config : m_plate_print_config;
+}
+
+std::string SelectMachineDialog::print_model_id() const
+{
+    PresetBundle& bundle = *wxGetApp().preset_bundle;
+    return m_plate_print_config.empty() ? bundle.printers.get_edited_preset().get_printer_type(&bundle) :
+        plate_printer_model_id(m_plate_print_config, bundle);
+}
+
+size_t SelectMachineDialog::print_filament_count() const
+{
+    return m_plate_print_config.empty() ? wxGetApp().preset_bundle->filament_presets.size() :
+        m_plate_print_config.option<ConfigOptionStrings>("filament_type")->values.size();
 }
 
 void SelectMachineDialog::update_print_status_msg()
@@ -2057,7 +2108,7 @@ bool SelectMachineDialog::CheckWarningSmartNozzleBlobAuto(MachineObject* obj_)
     // Need at least one stringing-prone filament in the sliced project for any nozzle on the current
     // printer config; iterating the diameters covers single- and dual-extruder printers.
     if (!wxGetApp().preset_bundle) return true;
-    const auto& full_config = wxGetApp().preset_bundle->full_config();
+    const auto& full_config = print_full_config();
     const auto* opt_nozzle_diameters = full_config.option<ConfigOptionFloats>("nozzle_diameter");
     if (!opt_nozzle_diameters || opt_nozzle_diameters->values.empty()) return true;
 
@@ -2134,7 +2185,7 @@ std::optional<float> SelectMachineDialog::get_filament_change_gap_time(MachineOb
     const std::vector<int> nozzle_change_seq(gcode_result->nozzle_change_sequence.begin(), gcode_result->nozzle_change_sequence.end());
 
     MultiNozzleUtils::FilamentChangeTimeParams params;
-    const auto& full_config = wxGetApp().preset_bundle->full_config();
+    const auto& full_config = print_full_config();
     if (const auto* load_time_opt = full_config.option<ConfigOptionFloat>("machine_load_filament_time"))
         params.standard_load_time = load_time_opt->value;
     if (const auto* unload_time_opt = full_config.option<ConfigOptionFloat>("machine_unload_filament_time"))
@@ -2440,8 +2491,7 @@ void SelectMachineDialog::show_status(PrintDialogStatus status, std::vector<wxSt
             //target print
             std::string target_model_id;
             if (m_print_type == PrintFromType::FROM_NORMAL){
-                PresetBundle* preset_bundle = wxGetApp().preset_bundle;
-                target_model_id = preset_bundle->printers.get_edited_preset().get_printer_type(preset_bundle);
+                target_model_id = print_model_id();
             }
             else if (m_print_type == PrintFromType::FROM_SDCARD_VIEW) {
                 if (m_required_data_plate_data_list.size() > 0) {
@@ -2627,7 +2677,7 @@ void SelectMachineDialog::on_cancel(wxCloseEvent &event)
 bool SelectMachineDialog::is_blocking_printing(MachineObject* obj_)
 {
     if (m_print_type == PrintFromType::FROM_NORMAL)
-        return wxGetApp().is_blocking_printing(obj_);
+        return wxGetApp().is_blocking_printing(obj_, print_model_id());
 
     std::string source_model;
     if (m_print_type == PrintFromType::FROM_SDCARD_VIEW && !m_required_data_plate_data_list.empty())
@@ -2635,7 +2685,7 @@ bool SelectMachineDialog::is_blocking_printing(MachineObject* obj_)
     return wxGetApp().is_blocking_printing(obj_, source_model);
 }
 
-static std::unordered_set<int> _get_used_nozzle_idxes()
+static std::unordered_set<int> _get_used_nozzle_idxes(const DynamicPrintConfig& config)
 {
     std::unordered_set<int> used_nozzle_idxes;
 
@@ -2644,11 +2694,10 @@ static std::unordered_set<int> _get_used_nozzle_idxes()
         MachineObject *obj_ = dev->get_selected_machine();
         if (obj_) {
             try {
-                PresetBundle *preset_bundle   = wxGetApp().preset_bundle;
                 PartPlate *cur_plate          = wxGetApp().plater()->get_partplate_list().get_curr_plate();
                 auto       used_filament_idxs = cur_plate->get_used_filaments(); /*the index is started from 1*/
                 for (int used_filament_idx : used_filament_idxs) {
-                    int used_nozzle_idx = cur_plate->get_physical_extruder_by_filament_id(preset_bundle->full_config(), used_filament_idx);
+                    int used_nozzle_idx = cur_plate->get_physical_extruder_by_filament_id(config, used_filament_idx);
                     used_nozzle_idxes.insert(used_nozzle_idx);
                 }
             } catch (const std::exception &) {}
@@ -2718,7 +2767,7 @@ bool SelectMachineDialog::is_same_printer_model()
 
     PresetBundle* preset_bundle = wxGetApp().preset_bundle;
     if(preset_bundle == nullptr) return result;
-    const auto source_model = preset_bundle->printers.get_edited_preset().get_printer_type(preset_bundle);
+    const auto source_model = print_model_id();
     const auto target_model = obj_->printer_type;
     if (DevPrinterConfigUtil::is_optional_printer_model_id(source_model) ||
         DevPrinterConfigUtil::is_optional_printer_model_id(target_model)) {
@@ -3605,8 +3654,39 @@ void SelectMachineDialog::on_send_print()
     if (!dev) return;
 
     MachineObject* obj_ = dev->get_selected_machine();
-    assert(obj_->get_dev_id() == m_printer_last_select);
-    if (obj_ == nullptr) { return; }
+    if (obj_ == nullptr || obj_->get_dev_id() != m_printer_last_select)
+        return;
+    const auto plate_target_unchanged = [&]() {
+        if (m_print_plate_id.invalid())
+            return true;
+        const auto* plate = selected_print_plate(m_plater);
+        if (plate == nullptr || plate->id() != m_print_plate_id ||
+            m_plater->get_partplate_list().get_curr_plate_index() != m_print_plate_idx ||
+            dev->get_current_printer_agent_id() != m_plate_agent_id || dev->get_selected_machine() != obj_)
+            return false;
+        auto& bundle = *wxGetApp().preset_bundle;
+        if (plate_printer_agent_id(plate, bundle) != m_plate_agent_id)
+            return false;
+        if (plate->printer_profile().assigned() && m_plate_agent_id != BBL_PRINTER_AGENT_ID) {
+            const auto* config = plate_print_host_config(plate, bundle);
+            return config && plate_print_host_device_id(*config) == m_plate_device_id &&
+                (m_plate_device_id.empty() || obj_->get_dev_id() == m_plate_device_id);
+        }
+        return true;
+    };
+    if (!plate_target_unchanged()) {
+        m_status_bar->set_status_text(_L("The plate or printer selection changed. Open Print plate again."));
+        return;
+    }
+    if (!m_plate_agent_id.empty()) {
+        if (is_blocking_printing(obj_)) {
+            show_status(PrintDialogStatus::PrintStatusUnsupportedPrinter);
+            return;
+        }
+        if (!CheckErrorExtruderNozzleWithSlicing(obj_))
+            return;
+    }
+    const bool lan = obj_->is_lan_mode_printer();
 
     BOOST_LOG_TRIVIAL(info) << __FUNCTION__ << ", print_job: for send task, current printer id =  " << m_printer_last_select << std::endl;
     show_status(PrintDialogStatus::PrintStatusSending);
@@ -3660,7 +3740,7 @@ void SelectMachineDialog::on_send_print()
         }
 
         // export config 3mf if needed
-        if (!obj_->is_lan_mode_printer()) {
+        if (!lan) {
             result = m_plater->export_config_3mf(m_print_plate_idx);
             if (result < 0) {
                 BOOST_LOG_TRIVIAL(info) << "export_config_3mf failed, result = " << result;
@@ -3674,6 +3754,10 @@ void SelectMachineDialog::on_send_print()
         }
     }
 
+    if (!plate_target_unchanged()) {
+        m_status_bar->set_status_text(_L("The plate or printer selection changed. Open Print plate again."));
+        return;
+    }
     m_print_job = std::make_shared<PrintJob>(m_printer_last_select);
     m_print_job->m_dev_ip = obj_->get_dev_ip();
     m_print_job->m_ftp_folder = obj_->get_ftp_folder();
@@ -3692,6 +3776,19 @@ void SelectMachineDialog::on_send_print()
         BOOST_LOG_TRIVIAL(info) << "print_job: m_print_type = from_normal";
         m_print_job->m_print_type = "from_normal";
         m_print_job->set_project_name(m_current_project_name.utf8_string());
+        if (!m_plate_agent_id.empty()) {
+            m_plater->get_print_job_data(&m_print_job->job_data);
+            m_print_job->job_data.is_from_plater = false;
+            const auto agent = wxGetApp().getAgent()->get_printer_agent();
+            if (dynamic_cast<MoonrakerPrinterAgent*>(agent.get())) {
+                PartPlate* plate = m_plater->get_partplate_list().get_plate(m_print_plate_idx);
+                if (plate == nullptr || !plate->is_valid_gcode_file()) {
+                    m_status_bar->set_status_text(_L("Slice this plate before printing."));
+                    return;
+                }
+                m_print_job->set_dst_name(plate->get_gcode_filename());
+            }
+        }
     }
     else if(m_print_type == PrintFromType::FROM_SDCARD_VIEW){
         BOOST_LOG_TRIVIAL(info) << "print_job: m_print_type = from_sdcard_view";
@@ -4005,7 +4102,8 @@ _compare_obj_names(MachineObject* obj1, MachineObject* obj2)
 *******************************************************************/
 static void
 _collect_sorted_machines(Slic3r::DeviceManager* dev_manager,
-                         std::vector<MachineObject*>& sorted_machine_objs)
+                         std::vector<MachineObject*>& sorted_machine_objs,
+                         const std::string& printer_type)
 {
     sorted_machine_objs.clear();
     if (!dev_manager)
@@ -4014,8 +4112,6 @@ _collect_sorted_machines(Slic3r::DeviceManager* dev_manager,
     }
 
     /* Step 1 :Collect the target and compatible types*/
-    PresetBundle* preset_bundle = wxGetApp().preset_bundle;
-    const std::string& printer_type = preset_bundle->printers.get_edited_preset().get_printer_type(preset_bundle);
     const auto& compatible_types_list = DevPrinterConfigUtil::get_compatible_machine(printer_type);
     std::set<std::string> compatible_types_set(compatible_types_list.begin(), compatible_types_list.end());
 
@@ -4090,7 +4186,11 @@ void SelectMachineDialog::update_user_printer()
     }
 
     // update the machine list, and select a default machine
-    _collect_sorted_machines(dev, m_list);
+    _collect_sorted_machines(dev, m_list, print_model_id());
+    if (!m_plate_device_id.empty())
+        m_list.erase(std::remove_if(m_list.begin(), m_list.end(), [this](const MachineObject* machine) {
+            return machine->get_dev_id() != m_plate_device_id;
+        }), m_list.end());
     m_printer_box->SetPrinters(m_list);
     if (!m_list.empty())
     {
@@ -4429,7 +4529,7 @@ static wxString _get_nozzle_name(int total_ext_count, int ext_id)
 // For example:
 // {0, {0.4, S_FLOW}}, {1, {0.8, H_FLOW}}
 // {0, {0.4, S_FLOW}}, {0, {0.4, H_FLOW}} // hybrid
-static std::unordered_multimap<int, NozzleDef> s_get_slicing_extuder_nozzles()
+static std::unordered_multimap<int, NozzleDef> s_get_slicing_extuder_nozzles(const DynamicPrintConfig* plate_config)
 {
     std::unordered_multimap<int, NozzleDef> used_extuder_nozzles;
 
@@ -4443,12 +4543,14 @@ static std::unordered_multimap<int, NozzleDef> s_get_slicing_extuder_nozzles()
         return used_extuder_nozzles;
     }
 
-    auto opt_nozzle_diameters = preset_bundle->printers.get_edited_preset().config.option<ConfigOptionFloats>("nozzle_diameter");
+    const auto& printer_config = plate_config ? *plate_config : preset_bundle->printers.get_edited_preset().config;
+    auto opt_nozzle_diameters = printer_config.option<ConfigOptionFloats>("nozzle_diameter");
     if (!opt_nozzle_diameters) {
         return used_extuder_nozzles;
     }
 
-    auto nozzle_volume_type_opt = dynamic_cast<const ConfigOptionEnumsGeneric*>(preset_bundle->project_config.option("nozzle_volume_type"));
+    const auto& project_config = plate_config ? *plate_config : preset_bundle->project_config;
+    auto nozzle_volume_type_opt = project_config.option<ConfigOptionEnumsGeneric>("nozzle_volume_type");
     if (!nozzle_volume_type_opt) {
         return used_extuder_nozzles;
     }
@@ -4471,10 +4573,11 @@ static std::unordered_multimap<int, NozzleDef> s_get_slicing_extuder_nozzles()
             return used_extuder_nozzles;
         }
 
+        const auto config = plate_config ? *plate_config : preset_bundle->full_config();
         const auto& used_filament_idxs = cur_plate->get_used_filaments(); /*the index is started from 1*/
         for (int used_filament_idx : used_filament_idxs) {
-            int physical_idx = cur_plate->get_physical_extruder_by_filament_id(preset_bundle->full_config(), used_filament_idx);
-            int logic_extruder_idx = cur_plate->get_logical_extruder_by_filament_id(preset_bundle->full_config(), used_filament_idx);
+            int physical_idx = cur_plate->get_physical_extruder_by_filament_id(config, used_filament_idx);
+            int logic_extruder_idx = cur_plate->get_logical_extruder_by_filament_id(config, used_filament_idx);
             if (physical_idx < 0 || logic_extruder_idx < 0) {
                 assert(0);
                 continue;
@@ -4622,7 +4725,7 @@ bool SelectMachineDialog::CheckErrorExtruderNozzleWithSlicing(MachineObject* obj
     const auto& ext_sys = obj_->GetExtderSystem();
     const auto& nozzle_sys = obj_->GetNozzleSystem();
     if (m_print_type == FROM_NORMAL) {
-        const auto& slicing_ext_nozzles = s_get_slicing_extuder_nozzles();
+        const auto& slicing_ext_nozzles = s_get_slicing_extuder_nozzles(m_plate_print_config.empty() ? nullptr : &m_plate_print_config);
         for (auto slicing_ext_nozzle : slicing_ext_nozzles) {
             int slicing_ext_idx = slicing_ext_nozzle.first;
             auto slicing_ext = slicing_ext_nozzle.second;
@@ -4907,10 +5010,8 @@ void SelectMachineDialog::update_show_status(MachineObject* obj_)
 
     bool has_optional_printer_model = DevPrinterConfigUtil::is_optional_printer_model_id(obj_->printer_type);
     if (m_print_type == PrintFromType::FROM_NORMAL) {
-        PresetBundle* preset_bundle = wxGetApp().preset_bundle;
         has_optional_printer_model = has_optional_printer_model ||
-            (preset_bundle && DevPrinterConfigUtil::is_optional_printer_model_id(
-                preset_bundle->printers.get_edited_preset().get_printer_type(preset_bundle)));
+            DevPrinterConfigUtil::is_optional_printer_model_id(print_model_id());
     } else if (m_print_type == PrintFromType::FROM_SDCARD_VIEW && !m_required_data_plate_data_list.empty()) {
         has_optional_printer_model = has_optional_printer_model ||
             DevPrinterConfigUtil::is_optional_printer_model_id(
@@ -4942,7 +5043,7 @@ void SelectMachineDialog::update_show_status(MachineObject* obj_)
     // shows the actual count.
     int max_color = obj_->get_max_filament_color_count();
     if (max_color < 16) max_color = 16;
-    if (wxGetApp().preset_bundle->filament_presets.size() > (size_t)max_color && m_print_type != PrintFromType::FROM_SDCARD_VIEW) {
+    if (print_filament_count() > (size_t)max_color && m_print_type != PrintFromType::FROM_SDCARD_VIEW) {
         if (!obj_->is_enable_ams_np && !obj_->is_enable_np)
         {
             show_status(PrintDialogStatus::PrintStatusColorQuantityExceed, {wxString::Format("%d", max_color)});
@@ -4988,7 +5089,7 @@ void SelectMachineDialog::update_show_status(MachineObject* obj_)
         }
     }
 
-    const auto &full_config = wxGetApp().preset_bundle->full_config();
+    const auto &full_config = print_full_config();
     size_t      nozzle_nums = full_config.option<ConfigOptionFloats>("nozzle_diameter")->values.size();
 
     // Filament Track Switch: warn on a slicing/hardware mismatch, and block Send when dynamic
@@ -5005,7 +5106,7 @@ void SelectMachineDialog::update_show_status(MachineObject* obj_)
     {
         // Orca: blocking hardness gate on the mounted nozzles; the rack extruder is instead judged
         // per dispatch-mapped nozzle in the blacklist loop below, as a non-blocking caution.
-        const auto &used_nozzle_idxes = _get_used_nozzle_idxes();
+        const auto &used_nozzle_idxes = _get_used_nozzle_idxes(full_config);
         for (const auto &extder : obj_->GetExtderSystem()->GetExtruders()) {
             if (used_nozzle_idxes.count(extder.GetNozzleId()) == 0) { continue; }
             if (_is_rack_managed_nozzle(obj_, extder.GetNozzleId())) { continue; }
@@ -5274,11 +5375,13 @@ void SelectMachineDialog::update_show_status(MachineObject* obj_)
         std::set<std::string> high_temp_filaments;
         std::unordered_set<int> known_fila_soften_extruders;
         std::unordered_set<int> unknown_fila_soften_extruders;
-        auto preset_full_config = wxGetApp().preset_bundle->full_config();
+        auto preset_full_config = print_full_config();
         auto chamber_temperatures = preset_full_config.option<ConfigOptionInts>("chamber_temperature");
         for (const FilamentInfo& item : m_ams_mapping_result) {
             try
             {
+                if (!chamber_temperatures || item.id < 0 || size_t(item.id) >= chamber_temperatures->values.size())
+                    continue;
                 int chamber_temp = chamber_temperatures->values[item.id];
                 if (chamber_temp >= 40) {
                     high_temp_filaments.insert(item.get_display_filament_type());// high printing chamber temperature
@@ -5569,29 +5672,30 @@ void SelectMachineDialog::reset_and_sync_ams_list()
     std::vector<std::string> brands;
     std::vector<std::string> display_materials;
     std::vector<std::string> m_filaments_id;
-    auto                     preset_bundle = wxGetApp().preset_bundle;
+    auto full_config = print_full_config();
 
-    for (auto filament_name : preset_bundle->filament_presets) {
-        for (int f_index = 0; f_index < preset_bundle->filaments.size(); f_index++) {
-            PresetCollection *filament_presets = &wxGetApp().preset_bundle->filaments;
-            Preset *          preset           = &filament_presets->preset(f_index);
-            int size = preset_bundle->filaments.size();
-            if (preset && filament_name.compare(preset->name) == 0) {
-                std::string display_filament_type;
-                std::string filament_type = preset->config.get_filament_type(display_filament_type);
-                std::string m_filament_id = preset->filament_id;
-                display_materials.push_back(display_filament_type);
-                materials.push_back(filament_type);
-                m_filaments_id.push_back(m_filament_id);
-
-                std::string m_vendor_name = "";
-                auto        vendor        = dynamic_cast<ConfigOptionStrings *>(preset->config.option("filament_vendor"));
-                if (vendor && (vendor->values.size() > 0)) {
-                    std::string vendor_name = vendor->values[0];
-                    m_vendor_name           = vendor_name;
-                }
-                brands.push_back(m_vendor_name);
-            }
+    if (!m_plate_print_config.empty()) {
+        const auto* vendors = full_config.option<ConfigOptionStrings>("filament_vendor");
+        const auto* ids = full_config.option<ConfigOptionStrings>("filament_ids");
+        for (size_t slot = 0; slot < print_filament_count(); ++slot) {
+            std::string display_type;
+            materials.push_back(full_config.get_filament_type(display_type, int(slot)));
+            display_materials.push_back(std::move(display_type));
+            brands.push_back(vendors && slot < vendors->values.size() ? vendors->values[slot] : "");
+            m_filaments_id.push_back(ids && slot < ids->values.size() ? ids->values[slot] : "");
+        }
+    } else {
+        auto& bundle = *wxGetApp().preset_bundle;
+        for (const auto& filament_name : bundle.filament_presets) {
+            Preset* preset = bundle.filaments.find_preset(filament_name);
+            if (preset == nullptr)
+                continue;
+            std::string display_type;
+            materials.push_back(preset->config.get_filament_type(display_type));
+            display_materials.push_back(std::move(display_type));
+            m_filaments_id.push_back(preset->filament_id);
+            const auto* vendor = preset->config.option<ConfigOptionStrings>("filament_vendor");
+            brands.push_back(vendor && !vendor->values.empty() ? vendor->values.front() : "");
         }
     }
 
@@ -5611,28 +5715,30 @@ void SelectMachineDialog::reset_and_sync_ams_list()
     m_filaments.clear();
     m_ams_tooltip =_L("Upper half area:  Original\nLower half area:  Filament in AMS\nAnd you can click it to modify");
 
-    const auto& full_config = wxGetApp().preset_bundle->full_config();
     size_t nozzle_nums = full_config.option<ConfigOptionFloats>("nozzle_diameter")->values.size();
 
     bool use_double_extruder = nozzle_nums > 1 ? true : false;
     if (use_double_extruder)
     {
-        const auto& project_config = preset_bundle->project_config;
-        m_filaments_map = wxGetApp().plater()->get_partplate_list().get_curr_plate()->get_real_filament_maps(project_config);
+        m_filaments_map = wxGetApp().plater()->get_partplate_list().get_curr_plate()->get_real_filament_maps(print_project_config());
+        if (!m_plate_print_config.empty())
+            m_filaments_map.resize(materials.size(), 1);
     }
 
     bool          selected_any      = false;
     MaterialItem *first_enabled     = nullptr;
     int           first_enabled_id  = -1;
 
+    const auto* colors = print_project_config().option<ConfigOptionStrings>("filament_colour");
     for (auto i = 0; i < extruders.size(); i++) {
-        auto          extruder = extruders[i] - 1;
-        auto          colour   = wxGetApp().preset_bundle->project_config.opt_string("filament_colour", (unsigned int) extruder);
+        const int extruder = extruders[i] - 1;
+        if (extruder < 0 || size_t(extruder) >= materials.size())
+            continue;
+        const std::string colour = colors && !colors->values.empty() ? colors->get_at(extruder) : "#FFFFFF";
         unsigned char rgb[4];
         bmcache.parse_color4(colour, rgb);
 
         auto colour_rgb = wxColour((int) rgb[0], (int) rgb[1], (int) rgb[2], (int) rgb[3]);
-        if (extruder >= materials.size() || extruder < 0 || extruder >= display_materials.size()) continue;
 
         MaterialItem* item = nullptr;
         if (use_double_extruder)
@@ -5780,7 +5886,7 @@ void SelectMachineDialog::update_material_item_pos(MachineObject* obj_)
     const bool is_single_head = obj_->GetExtderSystem()->GetTotalExtderCount() < 2;
     const bool has_switcher = obj_->GetFilaSwitch()->IsInstalled();
     // reset_and_sync_ams_list() fills m_filaments_map only for a multi-nozzle plate
-    const auto& full_config = wxGetApp().preset_bundle->full_config();
+    const auto& full_config = print_full_config();
     const bool single_nozzle_plate = full_config.option<ConfigOptionFloats>("nozzle_diameter")->values.size() < 2;
     const bool use_single_panel = is_single_head || has_switcher || single_nozzle_plate;
 
@@ -5889,7 +5995,7 @@ void SelectMachineDialog::clone_thumbnail_data() {
     }
 
     // Expand color arrays to cover mixed (virtual) slots and compute their blended colors
-    const auto& cfg = wxGetApp().preset_bundle->project_config;
+    const auto& cfg = print_project_config();
     size_t total = 0;
     if (auto* opt = cfg.option<ConfigOptionBools>("filament_is_mixed"))
         total = opt->values.size();
@@ -6076,7 +6182,7 @@ void SelectMachineDialog::change_default_normal(int old_filament_id, wxColour te
         }
     }
     // Recompute mixed slot colors after physical slot color change
-    const auto& cfg = wxGetApp().preset_bundle->project_config;
+    const auto& cfg = print_project_config();
     recompute_mixed_slot_colors(m_cur_colors_in_thumbnail, cfg);
 
     ThumbnailData& data = m_cur_input_thumbnail_data;
@@ -6444,8 +6550,7 @@ bool SelectMachineDialog::Show(bool show)
     show_status(PrintDialogStatus::PrintStatusInit);
 
 
-    PresetBundle& preset_bundle = *wxGetApp().preset_bundle;
-    const auto& project_config = preset_bundle.project_config;
+    const auto& project_config = print_project_config();
 
     const t_config_enum_values &enum_keys_map = ConfigOptionEnum<BedType>::get_enum_values();
     const ConfigOptionEnum<BedType>* bed_type=project_config.option<ConfigOptionEnum<BedType>>("curr_bed_type");

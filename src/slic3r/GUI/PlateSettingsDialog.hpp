@@ -114,6 +114,8 @@ public:
     );
 
     ~PlateSettingsDialog();
+    void sync_printer_profiles(const std::vector<wxString>& choices, int selection);
+    int get_printer_profile_choice() const;
     void sync_bed_type(BedType type);
     void sync_print_seq(int print_seq = 0);
     void sync_first_layer_print_seq(int selection, const std::vector<int>& seq = std::vector<int>());
@@ -177,6 +179,7 @@ protected:
     void delete_layers();
 
 protected:
+    ComboBox* m_printer_profile_choice { nullptr };
     ComboBox* m_bed_type_choice { nullptr };
     std::vector<BedType> m_cur_combox_bed_types;
     ComboBox* m_print_seq_choice { nullptr };

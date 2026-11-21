@@ -18,6 +18,9 @@
 #include "slic3r/GUI/wxExtensions.hpp"
 #include <vector>
 #include "slic3r/GUI/GUI_App.hpp"
+#include "slic3r/GUI/PartPlate.hpp"
+#include "slic3r/GUI/Plater.hpp"
+#include "libslic3r/PresetBundle.hpp"
 #include "slic3r/GUI/GUI_Utils.hpp"
 #include <wx/sizer.h>
 #include "slic3r/GUI/Widgets/TextInput.hpp"
@@ -409,31 +412,51 @@ PlateSettingsDialog::PlateSettingsDialog(wxWindow* parent, const wxString& title
     top_sizer->Add(plate_name_txt, 0, wxALIGN_CENTER_VERTICAL | wxALIGN_LEFT | wxTOP | wxBOTTOM, FromDIP(5));
     top_sizer->Add(m_ti_plate_name, 0, wxALIGN_CENTER_VERTICAL | wxALIGN_RIGHT | wxTOP | wxBOTTOM, FromDIP(5));
 
-    m_bed_type_choice = new ComboBox( this, wxID_ANY, wxEmptyString, wxDefaultPosition, wxSize(FromDIP(240),-1), 0, NULL, wxCB_READONLY );
-    auto pm           = wxGetApp().plater()->get_curr_printer_model();
-    if (pm) {
-        m_cur_combox_bed_types.clear();
-        m_bed_type_choice->AppendString(_L("Same as Global Plate Type"));
-        const ConfigOptionDef *bed_type_def = print_config_def.get("curr_bed_type");
-        int                    index        = 0;
-        for (auto item : bed_type_def->enum_labels) {
-            index++;
-            bool find = std::find(pm->not_support_bed_types.begin(), pm->not_support_bed_types.end(), item) != pm->not_support_bed_types.end();
-            if (!find) {
-                m_bed_type_choice->AppendString(_L(item));
-                m_cur_combox_bed_types.emplace_back(BedType(index));
-            }
-        }
+    if (!only_layer_seq && wxGetApp().plater()->printer_technology() == ptFFF) {
+        auto* label = new wxStaticText(this, wxID_ANY, _L("Printer profile"));
+        label->SetFont(Label::Body_14);
+        m_printer_profile_choice = new ComboBox(this, wxID_ANY, wxEmptyString, wxDefaultPosition,
+                                                wxSize(FromDIP(300), -1), 0, nullptr, wxCB_READONLY);
+        m_printer_profile_choice->SetToolTip(_L("Choose a printer for this plate, or capture the printer, process and filaments currently set in the sidebar."));
+        top_sizer->Add(label, 0, wxALIGN_CENTER_VERTICAL | wxALIGN_LEFT | wxTOP | wxBOTTOM, FromDIP(5));
+        top_sizer->Add(m_printer_profile_choice, 0, wxALIGN_CENTER_VERTICAL | wxALIGN_RIGHT | wxTOP | wxBOTTOM, FromDIP(5));
+    }
 
-    } else {
-        for (BedType i = btDefault; i < btCount; i = BedType(int(i) + 1)) {
-            m_bed_type_choice->Append(to_bed_type_name(i));
+    m_bed_type_choice = new ComboBox( this, wxID_ANY, wxEmptyString, wxDefaultPosition, wxSize(FromDIP(240),-1), 0, NULL, wxCB_READONLY );
+    auto& bundle = *wxGetApp().preset_bundle;
+    auto* plater = wxGetApp().plater();
+    const auto* plate = plater->get_partplate_list().get_selected_plate();
+    const auto* profile = plate && plate->printer_profile().assigned() ? &plate->printer_profile() : nullptr;
+    const auto& printer_config = profile ? profile->config : bundle.printers.get_edited_preset().config;
+    const bool is_bambu = profile ? profile->is_bambu : bundle.is_bbl_vendor();
+    const auto* multi_bed = printer_config.option<ConfigOptionBool>("support_multi_bed_types");
+
+    const VendorProfile::PrinterModel* model = nullptr;
+    if (!profile) {
+        model = plater->get_curr_printer_model();
+    } else if (const auto* model_name = printer_config.option<ConfigOptionString>("printer_model")) {
+        for (const auto& vendor : bundle.vendors) {
+            const auto& models = vendor.second.models;
+            const auto match = std::find_if(models.begin(), models.end(), [model_name](const auto& candidate) {
+                return candidate.name == model_name->value;
+            });
+            if (match != models.end()) {
+                model = &*match;
+                break;
+            }
         }
     }
 
-    auto &preset_bundle = *wxGetApp().preset_bundle;
-    const auto &printer_config = preset_bundle.printers.get_edited_preset().config;
-    m_bed_type_choice->Enable(preset_bundle.is_bbl_vendor() || printer_config.opt_bool("support_multi_bed_types"));
+    m_bed_type_choice->AppendString(profile ? _L("Use printer profile bed type") : _L("Same as Global Plate Type"));
+    const auto& labels = print_config_def.get("curr_bed_type")->enum_labels;
+    for (size_t i = 0; i < labels.size(); ++i) {
+        if (model && std::find(model->not_support_bed_types.begin(), model->not_support_bed_types.end(), labels[i])
+                         != model->not_support_bed_types.end())
+            continue;
+        m_bed_type_choice->AppendString(_L(labels[i]));
+        m_cur_combox_bed_types.emplace_back(BedType(i + 1));
+    }
+    m_bed_type_choice->Enable(is_bambu || (multi_bed && multi_bed->value));
 
     wxStaticText* m_bed_type_txt = new wxStaticText(this, wxID_ANY, _L("Bed type"));
     m_bed_type_txt->SetFont(Label::Body_14);
@@ -575,6 +598,26 @@ PlateSettingsDialog::~PlateSettingsDialog()
 
 }
 
+void PlateSettingsDialog::sync_printer_profiles(const std::vector<wxString>& choices, int selection)
+{
+    if (m_printer_profile_choice) {
+        for (const auto& choice : choices)
+            m_printer_profile_choice->Append(choice);
+        m_printer_profile_choice->SetSelection(selection);
+        const bool bed_types_supported = m_bed_type_choice->IsEnabled();
+        m_printer_profile_choice->Bind(wxEVT_COMBOBOX, [this, selection, bed_types_supported](wxCommandEvent& event) {
+            // Changing the printer resets bed overrides. The list belongs to the current profile.
+            m_bed_type_choice->Enable(bed_types_supported && m_printer_profile_choice->GetSelection() == selection);
+            event.Skip();
+        });
+    }
+}
+
+int PlateSettingsDialog::get_printer_profile_choice() const
+{
+    return m_printer_profile_choice ? m_printer_profile_choice->GetSelection() : wxNOT_FOUND;
+}
+
 void PlateSettingsDialog::sync_bed_type(BedType type)
 {
     if (m_bed_type_choice != nullptr) {
@@ -679,8 +722,8 @@ BedType PlateSettingsDialog::get_bed_type_choice()
 {
     if (m_bed_type_choice != nullptr) {
         int choice = m_bed_type_choice->GetSelection();
-        if (choice > 0) {
-            return m_cur_combox_bed_types[choice - 1];//-1 because same as globlal
+        if (choice > 0 && size_t(choice) <= m_cur_combox_bed_types.size()) {
+            return m_cur_combox_bed_types[choice - 1];
         }
     }
     return BedType::btDefault;

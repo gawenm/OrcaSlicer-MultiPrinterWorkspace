@@ -2,6 +2,7 @@
 
 #include "PrinterWebViewHandler.hpp"
 #include "I18N.hpp"
+#include "GUI.hpp"
 
 #include "slic3r/GUI/PrinterWebView.hpp"
 #include "slic3r/GUI/GUI_App.hpp"
@@ -28,6 +29,7 @@
 #include <wx/sizer.h>
 #include <wx/string.h>
 #include <wx/toolbar.h>
+#include <wx/uri.h>
 #include <wx/utils.h>
 #include <wx/webview.h>
 
@@ -215,41 +217,44 @@ void PrinterWebView::reset_browser()
     m_url_deferred = m_url;
 }
 
-// Same lookup as create_printer_webview_handler().
-static PrintHostType active_host_type()
+// A redirect on the same printer may change the path.
+static bool is_printer_page(const wxString& url, const wxString& printer_url)
 {
-    if (wxGetApp().preset_bundle == nullptr)
-        return htOctoPrint;
-    return wxGetApp().preset_bundle->printers.get_edited_preset().config.option<ConfigOptionEnum<PrintHostType>>("host_type")->value;
+    const wxURI page(url);
+    const wxURI printer(printer_url);
+    if (printer.GetScheme() == "file")
+        return url.BeforeFirst('#') == printer_url.BeforeFirst('#');
+    if (!page.HasServer() || !printer.HasServer() || page.GetScheme() != printer.GetScheme() ||
+        page.GetServer().CmpNoCase(printer.GetServer()) != 0)
+        return false;
+    const wxString default_port = printer.GetScheme() == "https" ? "443" : "80";
+    return (page.HasPort() ? page.GetPort() : default_port) ==
+           (printer.HasPort() ? printer.GetPort() : default_port);
 }
 
-void PrinterWebView::load_url(wxString& url, wxString apikey)
+void PrinterWebView::load_url(const wxString& url, const wxString& apikey, std::shared_ptr<const DynamicPrintConfig> config)
 {
-//    this->Show();
-//    this->Raise();
-    const PrintHostType host_type = active_host_type();
     // Selecting the tab requests the same page again; navigating would reload it and drop its state.
-    if (m_url_loaded && url == m_url && apikey == m_apikey && host_type == m_host_type)
+    const bool same_config = config && m_config ? *config == *m_config : config == m_config;
+    if (m_url_loaded && url == m_url && apikey == m_apikey && same_config)
         return;
 
+    const bool reset = m_apikey_sent && (url != m_url || apikey != m_apikey);
     m_url = url;
     m_apikey = apikey;
-    m_host_type = host_type;
-    m_apikey_sent = false;
+    m_config = std::move(config);
     m_url_loaded = false;
-    m_handler = create_printer_webview_handler(*this);
-
-    // Orca: IsShownOnScreen(), not IsShown(): the idle prebuild builds this view inside the hidden
-    // Device tab, and a new panel counts as shown, so the page and its camera stream would start
-    // before the tab is opened. Show() loads the deferred page.
-    if (this->IsShownOnScreen()) {
-        //ORCA: m_url_deferred will be cleared on load success
-        //m_url_deferred.clear();
-        m_browser->LoadURL(url);
-    } else {
-        m_url_deferred = url;
+    m_handler = create_printer_webview_handler(*this, m_config.get());
+    m_url_deferred = url;
+    if (IsShownOnScreen()) {
+        if (reset) {
+            m_reset_on_show = false;
+            reset_browser();
+        }
+        m_browser->LoadURL(m_url_deferred);
+    } else if (reset) {
+        m_reset_on_show = true;
     }
-    //m_browser->SetFocus();
     UpdateState();
 }
 
@@ -295,17 +300,20 @@ void PrinterWebView::SendAPIKey()
         return;
     m_apikey_sent   = true;
     wxString script = wxString::Format(R"(
-    // Check if window.fetch exists before overriding
-    if (window.fetch) {
+    if (window.fetch && window.location.origin === new URL(%s).origin) {
         const originalFetch = window.fetch;
         window.fetch = function(input, init = {}) {
-            init.headers = init.headers || {};
-            init.headers['X-API-Key'] = '%s';
+            const target = new URL(typeof input === 'string' || input instanceof URL ? input : input.url, document.baseURI);
+            if (target.origin === window.location.origin) {
+                init.headers = new Headers(init.headers || (input instanceof Request ? input.headers : undefined));
+                init.headers.set('X-API-Key', %s);
+            }
             return originalFetch(input, init);
         };
     }
 )",
-                                       m_apikey);
+        wxString::FromUTF8(nlohmann::json(into_u8(m_url)).dump()),
+        wxString::FromUTF8(nlohmann::json(into_u8(m_apikey)).dump()));
     m_browser->RemoveAllUserScripts();
     
     // RemoveAllUserScripts causes WebView to forget about our script message handler, 
@@ -364,6 +372,8 @@ void PrinterWebView::OnLoaded(wxWebViewEvent& evt)
     // The web view's initial empty document (about:blank on WebKit) is not the requested page.
     if (evt.GetURL().IsEmpty() || evt.GetURL() == "about:blank")
         return;
+    if (evt.GetEventObject() != m_browser || (m_config && !is_printer_page(evt.GetURL(), m_url)))
+        return;
     //ORCA: url loaded successfully, safe to clear
     m_url_deferred.clear();
     m_url_loaded = true;
@@ -385,8 +395,8 @@ void PrinterWebView::OnNewWindow(wxWebViewEvent& evt)
 
 void PrinterWebView::OnScriptMessage(wxWebViewEvent& evt)
 {
-  if (m_handler != nullptr)
-    m_handler->on_script_message(evt);
+    if (evt.GetEventObject() == m_browser && m_handler && m_url_loaded && is_printer_page(m_browser->GetCurrentURL(), m_url))
+        m_handler->on_script_message(evt);
 }
 
 

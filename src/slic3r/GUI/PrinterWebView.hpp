@@ -43,7 +43,7 @@ public:
     PrinterWebView(wxWindow *parent);
     virtual ~PrinterWebView();
 
-    void load_url(wxString& url, wxString apikey = "");
+    void load_url(const wxString& url, const wxString& apikey, std::shared_ptr<const DynamicPrintConfig> config);
     void UpdateState();
     void OnClose(wxCloseEvent& evt);
     void OnError(wxWebViewEvent& evt);
@@ -69,8 +69,8 @@ private:
     // Last url passed to load_url(), reloaded after reset_browser().
     wxString m_url;
     wxString m_url_deferred;
-    // Host type the page was loaded for; it selects the handler, so a change needs a reload.
-    PrintHostType m_host_type{htOctoPrint};
+    // Connection settings for the page and its message handler.
+    std::shared_ptr<const DynamicPrintConfig> m_config;
     // True once the page for m_url has finished loading in m_browser.
     bool m_url_loaded{false};
     std::unique_ptr<PrinterWebViewHandler> m_handler;

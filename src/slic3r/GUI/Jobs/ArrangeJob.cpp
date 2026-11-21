@@ -177,7 +177,7 @@ void ArrangeJob::prepare_belt_regions(int num_plates)
 {
     if (!params.is_belt || params.is_seq_print)
         return;
-    const DynamicPrintConfig &config    = wxGetApp().preset_bundle->full_config();
+    const DynamicPrintConfig config = m_plate_config.empty() ? wxGetApp().preset_bundle->full_config() : m_plate_config;
     const BoundingBoxf        bed       = get_extents(config.opt<ConfigOptionPoints>("printable_area")->values);
     const bool                belt_is_y = params.belt_axis == 1;
     std::vector<BoundingBoxf> regions;
@@ -249,7 +249,7 @@ void ArrangeJob::clear_input()
 ArrangePolygon ArrangeJob::prepare_arrange_polygon(void *model_instance, const PartPlate *mapping_plate)
 {
     ModelInstance* instance = (ModelInstance*)model_instance;
-    const Slic3r::DynamicPrintConfig& config = wxGetApp().preset_bundle->full_config();
+    const DynamicPrintConfig config = m_plate_config.empty() ? wxGetApp().preset_bundle->full_config() : m_plate_config;
     ArrangePolygon polygon = get_instance_arrange_poly(instance, config);
     if (mapping_plate != nullptr)
         set_arrange_polygon_bed_exclusion_extruders(polygon, *instance->get_object(), *mapping_plate, config);
@@ -561,7 +561,8 @@ void ArrangeJob::prepare_partplate() {
             continue;
         for (size_t inst_idx = 0; inst_idx < mo->instances.size(); ++inst_idx)
         {
-            bool             in_plate = plate->contain_instance(oidx, inst_idx) || plate->intersect_instance(oidx, inst_idx);
+            bool in_plate = plate->contain_instance(oidx, inst_idx) ||
+                            (!m_mixed_printers && plate->intersect_instance(oidx, inst_idx));
             ArrangePolygon&& ap = prepare_arrange_polygon(mo->instances[inst_idx], plate);
 
             ArrangePolygons& cont = mo->instances[inst_idx]->printable ?
@@ -589,13 +590,13 @@ void ArrangeJob::prepare_partplate() {
         m_unselected.emplace_back(std::move(ap));
     }
 
-    const DynamicPrintConfig &current_config  = wxGetApp().preset_bundle->prints.get_edited_preset().config;
-    bool   enable_wrapping = current_config.option<ConfigOptionBool>("enable_wrapping_detection")->value;
-
-    // add the virtual object into unselect list if has
-    plate_list.preprocess_exclude_areas(
-        m_unselected, wxGetApp().preset_bundle->full_config(), enable_wrapping, current_plate_index + 1);
-    prepare_belt_regions(current_plate_index + 1);
+    const DynamicPrintConfig current_config = m_plate_config.empty() ?
+        wxGetApp().preset_bundle->full_config() : m_plate_config;
+    const bool enable_wrapping = current_config.opt_bool("enable_wrapping_detection");
+    const int arrangement_beds = m_mixed_printers ? 1 : current_plate_index + 1;
+    plate_list.preprocess_exclude_areas(m_unselected, current_config, enable_wrapping, arrangement_beds, 0,
+                                       m_mixed_printers ? plate : nullptr);
+    prepare_belt_regions(arrangement_beds);
 }
 
 // Snapshot each plate's IMEX zones on the main thread, so process() never has to touch
@@ -635,25 +636,28 @@ void ArrangeJob::prepare()
         NotificationManager::NotificationLevel::RegularNotificationLevel, _u8L("Arranging..."));
     m_plater->get_notification_manager()->bbl_close_plateinfo_notification();
 
+    auto& plates = m_plater->get_partplate_list();
+    m_mixed_printers = plates.has_printer_profiles();
+    m_plate_config = m_mixed_printers ? plates.get_curr_plate()->build_print_config(*wxGetApp().preset_bundle) : DynamicPrintConfig{};
     params = init_arrange_params(m_plater);
 
     //BBS update extruder params and speed table before arranging
-    const Slic3r::DynamicPrintConfig& config = wxGetApp().preset_bundle->full_config();
-    auto& print = wxGetApp().plater()->get_partplate_list().get_current_fff_print();
-    auto print_config = print.config();
-    int numExtruders = wxGetApp().preset_bundle->filament_presets.size();
+    const DynamicPrintConfig config = m_plate_config.empty() ? wxGetApp().preset_bundle->full_config() : m_plate_config;
+    auto print_config = plates.get_current_fff_print().config();
+    if (!m_plate_config.empty())
+        print_config.apply(m_plate_config, true);
+    const int numExtruders = config.option<ConfigOptionStrings>("filament_type")->values.size();
 
     Model::setExtruderParams(config, numExtruders);
     Model::setPrintSpeedTable(config, print_config);
 
     int state = m_plater->get_prepare_state();
-    if (state == Job::JobPrepareState::PREPARE_STATE_DEFAULT) {
+    if (m_mixed_printers || state == Job::JobPrepareState::PREPARE_STATE_MENU) {
+        only_on_partplate = true;
+        prepare_partplate();
+    } else if (state == Job::JobPrepareState::PREPARE_STATE_DEFAULT) {
         only_on_partplate = false;
         prepare_all();
-    }
-    else if (state == Job::JobPrepareState::PREPARE_STATE_MENU) {
-        only_on_partplate = true;   // only arrange items on current plate
-        prepare_partplate();
     }
 
     // After prepare_all(), which locks the plates it must leave alone.
@@ -727,15 +731,17 @@ void ArrangeJob::process(Ctl &ctl)
 
     auto & partplate_list = m_plater->get_partplate_list();
 
-    const Slic3r::DynamicPrintConfig& global_config = wxGetApp().preset_bundle->full_config();
     PresetBundle* preset_bundle = wxGetApp().preset_bundle;
-    const bool is_bbl = wxGetApp().preset_bundle->is_bbl_vendor();
+    const DynamicPrintConfig global_config = m_plate_config.empty() ? preset_bundle->full_config() : m_plate_config;
+    const auto* plate = m_mixed_printers ? partplate_list.get_plate(current_plate_index) : nullptr;
+    const bool is_bbl = plate && plate->printer_profile().assigned() ? plate->printer_profile().is_bambu : preset_bundle->is_bbl_vendor();
+    const auto* arrange_config = m_plate_config.empty() ? m_plater->config() : &m_plate_config;
     if (is_bbl && params.avoid_extrusion_cali_region && global_config.opt_bool("scan_first_layer"))
         partplate_list.preprocess_nonprefered_areas(m_unselected, MAX_NUM_PLATES);
 
-    update_arrange_items(m_selected, m_unselected, m_plater->config(), params);
+    update_arrange_items(m_selected, m_unselected, arrange_config, params);
 
-    Points      bedpts = get_shrink_bedpts(m_plater->config(),params);
+    Points bedpts = get_shrink_bedpts(arrange_config, params);
 
     // Keep the parts on IDEX/IQEX plates in their primary zones; see ImexArranger.
     const ImexArranger imex(m_imex, params, bedpts);
@@ -743,7 +749,7 @@ void ArrangeJob::process(Ctl &ctl)
     imex.add_keep_outs(m_unselected);
 
     bool   enable_wrapping = global_config.option<ConfigOptionBool>("enable_wrapping_detection")->value;
-    partplate_list.preprocess_exclude_areas(params.excluded_regions, global_config, enable_wrapping, 1, scale_(1));
+    partplate_list.preprocess_exclude_areas(params.excluded_regions, global_config, enable_wrapping, 1, scale_(1), plate);
 
     BOOST_LOG_TRIVIAL(debug) << "arrange bedpts:" << bedpts[0].transpose() << ", " << bedpts[1].transpose() << ", " << bedpts[2].transpose() << ", " << bedpts[3].transpose();
 
@@ -988,7 +994,11 @@ arrangement::ArrangeParams init_arrange_params(Plater *p)
     arrangement::ArrangeParams         params;
     GLCanvas3D::ArrangeSettings       &settings     = p->canvas3D()->get_arrange_settings();
     auto                              &print        = wxGetApp().plater()->get_partplate_list().get_current_fff_print();
-    const PrintConfig                 &print_config = print.config();
+    const auto& profile = p->get_partplate_list().get_curr_plate()->printer_profile();
+    PrintConfig profile_config;
+    if (profile.assigned())
+        profile_config.apply(p->get_partplate_list().get_curr_plate()->build_print_config(*wxGetApp().preset_bundle), true);
+    const PrintConfig& print_config = profile.assigned() ? profile_config : print.config();
 
     auto [object_skirt_offset, object_skirt_witdh] = print.object_skirt_offset();
 
@@ -1020,7 +1030,7 @@ arrangement::ArrangeParams init_arrange_params(Plater *p)
     }
 
     int state = p->get_prepare_state();
-    if (state == Job::JobPrepareState::PREPARE_STATE_MENU) {
+    if (p->get_partplate_list().has_printer_profiles() || state == Job::JobPrepareState::PREPARE_STATE_MENU) {
         PartPlateList &plate_list = p->get_partplate_list();
         PartPlate *    plate      = plate_list.get_curr_plate();
         bool plate_same_as_global = true;

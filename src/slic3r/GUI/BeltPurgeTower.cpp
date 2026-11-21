@@ -84,7 +84,7 @@ bool ensure_belt_purge_tower(Model &model, PartPlateList &partplate_list, Object
     // purge tower, and this runs on every background-process tick — so avoid the
     // full_config() merge below unless this is actually a belt printer. (Also
     // tidies up a stale prism if the user switched away from a belt printer.)
-    {
+    if (!partplate_list.has_printer_profiles()) {
         const auto *belt_pre = wxGetApp().preset_bundle->printers.get_edited_preset().config.option<ConfigOptionBool>("belt_printer");
         if (belt_pre == nullptr || !belt_pre->value) {
             std::fill(sigs.begin(), sigs.end(), BeltPurgeSignature{});
@@ -96,76 +96,13 @@ bool ensure_belt_purge_tower(Model &model, PartPlateList &partplate_list, Object
         }
     }
 
-    // Read every sizing input from the MERGED full config — the exact same
-    // config the backend slices with (BackgroundSlicingProcess::apply uses
-    // preset_bundle->full_config()). Reading from the individual presets caused
-    // GUI/backend mismatches: e.g. purge_in_prime_tower or a populated
-    // flush_volumes_matrix present in the merged config but false/empty in the
-    // preset the GUI happened to read, so the tower was sized for the small
-    // prime_volume instead of the real color-change flush and could not absorb
-    // it. The three names below alias the one merged config so the rest of the
-    // function is unchanged.
-    const DynamicPrintConfig  full_cfg       = wxGetApp().preset_bundle->full_config();
-    const DynamicPrintConfig &printer_config = full_cfg;
-    const DynamicPrintConfig &print_config   = full_cfg;
-    const DynamicPrintConfig &project_config = full_cfg;
-
-    const auto *belt_opt = printer_config.option<ConfigOptionBool>("belt_printer");
-    const bool  belt     = belt_opt != nullptr && belt_opt->value;
-    // Belt purge tower is its own type, gated by the belt-only printer option
-    // enable_belt_purge_tower (not the classic process enable_prime_tower).
-    const bool  prime_tower_enabled = printer_config.has("enable_belt_purge_tower") && printer_config.opt_bool("enable_belt_purge_tower");
-    const auto *seq_opt   = print_config.option<ConfigOptionEnum<PrintSequence>>("print_sequence");
-    const bool  by_object = seq_opt != nullptr && seq_opt->value == PrintSequence::ByObject;
-
-    // Mixed filament slots are expanded to their physical components below.
-    std::vector<unsigned char> is_mixed;
-    std::vector<std::string>   comp_strs;
-    if (const auto *o = full_cfg.option<ConfigOptionBools>("filament_is_mixed"))
-        is_mixed = o->values;
-    if (const auto *o = full_cfg.option<ConfigOptionStrings>("filament_mixed_components"))
-        comp_strs = o->values;
-
-    const double gap     = 1.0;
-    const double layer_h = print_config.has("layer_height") ? print_config.opt_float("layer_height") : 0.2;
-
-    // Belt geometry. The rotation axis is the gantry tilt axis; the belt
-    // travels along the *other* horizontal axis (X-rotation -> belt along Y,
-    // the CR-30 default). The purge prism is a long bar laid along the belt
-    // travel direction, beside the parts. For no/Z rotation we fall back to
-    // vertical slicing geometry (theta = 90 deg).
-    const auto *axis_opt  = printer_config.option<ConfigOptionEnum<BeltRotationAxis>>("belt_slice_rotation");
-    const auto *angle_opt = printer_config.option<ConfigOptionFloat>("belt_slice_rotation_angle");
-    const BeltRotationAxis rot = axis_opt != nullptr ? axis_opt->value : BeltRotationAxis::X;
-    const bool   belt_is_y = (rot != BeltRotationAxis::Y); // X / None / Z -> belt along Y
-    double       theta     = M_PI / 2.;
-    if ((rot == BeltRotationAxis::X || rot == BeltRotationAxis::Y) && angle_opt != nullptr && std::abs(angle_opt->value) > EPSILON)
-        theta = std::clamp(Geometry::deg2rad(std::abs(angle_opt->value)), Geometry::deg2rad(5.), M_PI / 2.);
-    const double sin_t = std::sin(theta);
-    const double cot_t = std::cos(theta) / sin_t;
-
-    // NOTE: both purge_in_prime_tower and single_extruder_multi_material are
-    // PRINTER options (Preset.cpp s_Preset_printer_options) — read them from the
-    // printer preset. Reading purge_in_prime_tower from the print preset returns
-    // has()==false, collapsing use_matrix to false and sizing the tower for the
-    // small prime_volume instead of the real color-change flush. This must match
-    // the backend Print::_plan_belt_purge() which reads both from the merged config.
-    const bool use_matrix = (printer_config.has("purge_in_prime_tower") && printer_config.opt_bool("purge_in_prime_tower"))
-        && (printer_config.has("single_extruder_multi_material") && printer_config.opt_bool("single_extruder_multi_material"));
-    const double prime_volume     = print_config.has("prime_volume") ? print_config.opt_float("prime_volume") : 45.;
-    const double printable_height = printer_config.has("printable_height") ? printer_config.opt_float("printable_height") : 250.;
-
-    // The bed (printable_area) is plate-local but model instances live in the
-    // plate's world frame, so the plate origin is added to every bed coordinate.
-    const double inset = 1.;
-    BoundingBoxf bed_ext;
-    if (const auto *bed_opt = printer_config.option<ConfigOptionPoints>("printable_area");
-        bed_opt != nullptr && !bed_opt->values.empty())
-        bed_ext = get_extents(bed_opt->values);
+    const DynamicPrintConfig project_full_config = wxGetApp().preset_bundle->full_config();
 
     // What each plate needs, decided before anything is deleted or created.
+    constexpr double gap = 1.0;
     struct Plan
     {
+        bool belt_is_y = true;
         bool               wanted = false;
         BeltPurgeSignature sig;
         int                n_islands = 1;
@@ -177,6 +114,64 @@ bool ensure_belt_purge_tower(Model &model, PartPlateList &partplate_list, Object
     for (int plate_idx = 0; plate_idx < plate_count; ++plate_idx) {
         Plan      &plan  = plans[size_t(plate_idx)];
         PartPlate *plate = partplate_list.get_plate(plate_idx);
+        const auto& profile = plate->printer_profile();
+        const DynamicPrintConfig& full_cfg = profile.assigned() ? profile.config : project_full_config;
+        const auto& printer_config = full_cfg;
+        const auto& print_config = full_cfg;
+        const auto& project_config = full_cfg;
+
+        const auto *belt_opt = printer_config.option<ConfigOptionBool>("belt_printer");
+        const bool  belt     = belt_opt != nullptr && belt_opt->value;
+        // Belt purge tower is its own type, gated by the belt-only printer option
+        // enable_belt_purge_tower (not the classic process enable_prime_tower).
+        const bool  prime_tower_enabled = printer_config.has("enable_belt_purge_tower") && printer_config.opt_bool("enable_belt_purge_tower");
+        const bool by_object = plate->get_real_print_seq() == PrintSequence::ByObject;
+
+        // Mixed filament slots are expanded to their physical components below.
+        std::vector<unsigned char> is_mixed;
+        std::vector<std::string>   comp_strs;
+        if (const auto *o = full_cfg.option<ConfigOptionBools>("filament_is_mixed"))
+            is_mixed = o->values;
+        if (const auto *o = full_cfg.option<ConfigOptionStrings>("filament_mixed_components"))
+            comp_strs = o->values;
+
+        const double layer_h = print_config.has("layer_height") ? print_config.opt_float("layer_height") : 0.2;
+
+        // Belt geometry. The rotation axis is the gantry tilt axis; the belt
+        // travels along the *other* horizontal axis (X-rotation -> belt along Y,
+        // the CR-30 default). The purge prism is a long bar laid along the belt
+        // travel direction, beside the parts. For no/Z rotation we fall back to
+        // vertical slicing geometry (theta = 90 deg).
+        const auto *axis_opt  = printer_config.option<ConfigOptionEnum<BeltRotationAxis>>("belt_slice_rotation");
+        const auto *angle_opt = printer_config.option<ConfigOptionFloat>("belt_slice_rotation_angle");
+        const BeltRotationAxis rot = axis_opt != nullptr ? axis_opt->value : BeltRotationAxis::X;
+        const bool   belt_is_y = (rot != BeltRotationAxis::Y);
+        plan.belt_is_y = belt_is_y; // X / None / Z -> belt along Y
+        double       theta     = M_PI / 2.;
+        if ((rot == BeltRotationAxis::X || rot == BeltRotationAxis::Y) && angle_opt != nullptr && std::abs(angle_opt->value) > EPSILON)
+            theta = std::clamp(Geometry::deg2rad(std::abs(angle_opt->value)), Geometry::deg2rad(5.), M_PI / 2.);
+        const double sin_t = std::sin(theta);
+        const double cot_t = std::cos(theta) / sin_t;
+
+        // NOTE: both purge_in_prime_tower and single_extruder_multi_material are
+        // PRINTER options (Preset.cpp s_Preset_printer_options) — read them from the
+        // printer preset. Reading purge_in_prime_tower from the print preset returns
+        // has()==false, collapsing use_matrix to false and sizing the tower for the
+        // small prime_volume instead of the real color-change flush. This must match
+        // the backend Print::_plan_belt_purge() which reads both from the merged config.
+        const bool use_matrix = (printer_config.has("purge_in_prime_tower") && printer_config.opt_bool("purge_in_prime_tower"))
+            && (printer_config.has("single_extruder_multi_material") && printer_config.opt_bool("single_extruder_multi_material"));
+        const double prime_volume     = print_config.has("prime_volume") ? print_config.opt_float("prime_volume") : 45.;
+        const double printable_height = printer_config.has("printable_height") ? printer_config.opt_float("printable_height") : 250.;
+
+        // The bed (printable_area) is plate-local but model instances live in the
+        // plate's world frame, so the plate origin is added to every bed coordinate.
+        const double inset = 1.;
+        BoundingBoxf bed_ext;
+        if (const auto *bed_opt = printer_config.option<ConfigOptionPoints>("printable_area");
+            bed_opt != nullptr && !bed_opt->values.empty())
+            bed_ext = get_extents(bed_opt->values);
+
 
         // Filaments used and bounding extent of the non-prism objects on this
         // plate (1-based filament ids; volume extruder 0 = object default).
@@ -264,7 +259,7 @@ bool ensure_belt_purge_tower(Model &model, PartPlateList &partplate_list, Object
         // volume selection in Print::_plan_belt_purge()).
         double max_flush = prime_volume;
         if (use_matrix) {
-            const size_t extruder_nums = wxGetApp().preset_bundle->get_printer_extruder_count();
+            const size_t extruder_nums = printer_config.option<ConfigOptionFloats>("nozzle_diameter")->values.size();
             const std::vector<double> matrix = get_flush_volumes_matrix(
                 project_config.option<ConfigOptionFloats>("flush_volumes_matrix")->values, 0, extruder_nums);
             const auto * multi_opt = project_config.option<ConfigOptionFloats>("flush_multiplier");
@@ -402,6 +397,7 @@ bool ensure_belt_purge_tower(Model &model, PartPlateList &partplate_list, Object
     // they can butt up while staying individually purgeable.
     for (int plate_idx : to_create) {
         const Plan &plan = plans[size_t(plate_idx)];
+        const bool belt_is_y = plan.belt_is_y;
 
         TriangleMesh prism_mesh;
         for (int i = 0; i < plan.n_islands; ++i) {

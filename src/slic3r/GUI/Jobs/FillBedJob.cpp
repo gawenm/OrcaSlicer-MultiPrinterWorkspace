@@ -47,7 +47,6 @@ void FillBedJob::prepare()
     m_unselected.clear();
     m_bedpts.clear();
 
-    params = init_arrange_params(m_plater);
 
     m_object_idx = m_plater->get_selected_object_idx();
     if (m_object_idx == -1)
@@ -61,6 +60,11 @@ void FillBedJob::prepare()
     BOOST_LOG_TRIVIAL(debug) << __FUNCTION__ << boost::format(":select plate obj_id %1%, ins_id %2%, ret %3%}") % m_object_idx % sel_id % sel_ret;
 
     PartPlate* plate = plate_list.get_curr_plate();
+    m_grouped_layout = plate_list.has_printer_profiles();
+    m_plate_index = plate->get_index();
+    m_template_instance = size_t(sel_id);
+    m_plate_config = plate->build_print_config(*wxGetApp().preset_bundle);
+    params = init_arrange_params(m_plater);
     Model& model = m_plater->model();
     BoundingBox plate_bb = plate->get_bounding_box_crd();
     int plate_cols = plate_list.get_plate_cols();
@@ -69,7 +73,7 @@ void FillBedJob::prepare()
     ModelObject *model_object = m_plater->model().objects[m_object_idx];
     if (model_object->instances.empty()) return;
 
-    const Slic3r::DynamicPrintConfig& global_config = wxGetApp().preset_bundle->full_config();
+    const DynamicPrintConfig& global_config = m_plate_config;
     m_selected.reserve(model_object->instances.size());
     for (size_t oidx = 0; oidx < model.objects.size(); ++oidx)
     {
@@ -79,6 +83,11 @@ void FillBedJob::prepare()
             bool selected = (oidx == m_object_idx);
 
             ArrangePolygon ap = get_instance_arrange_poly(mo->instances[inst_idx], global_config);
+            if (m_grouped_layout && !plate->contain_instance(oidx, inst_idx)) {
+                ap.bed_idx = PartPlateList::MAX_PLATES_COUNT;
+                m_locked.emplace_back(std::move(ap));
+                continue;
+            }
             set_arrange_polygon_bed_exclusion_extruders(ap, *mo, *plate, global_config);
             BoundingBox ap_bb = ap.transformed_poly().contour.bounding_box();
             ap.name = mo->name;
@@ -99,8 +108,8 @@ void FillBedJob::prepare()
                         ap.itemid = m_unselected.size();
                         ap.row = cur_plate_index / plate_cols;
                         ap.col = cur_plate_index % plate_cols;
-                        ap.translation(X) -= bed_stride_x(m_plater) * ap.col;
-                        ap.translation(Y) += bed_stride_y(m_plater) * ap.row;
+                        ap.translation(X) -= m_grouped_layout ? scaled<coord_t>(plate->get_origin().x()) : bed_stride_x(m_plater) * ap.col;
+                        ap.translation(Y) += m_grouped_layout ? -scaled<coord_t>(plate->get_origin().y()) : bed_stride_y(m_plater) * ap.row;
                         m_unselected.emplace_back(ap);
                     }
                     else
@@ -119,8 +128,8 @@ void FillBedJob::prepare()
                     ap.itemid = m_unselected.size();
                     ap.row = cur_plate_index / plate_cols;
                     ap.col = cur_plate_index % plate_cols;
-                    ap.translation(X) -= bed_stride_x(m_plater) * ap.col;
-                    ap.translation(Y) += bed_stride_y(m_plater) * ap.row;
+                    ap.translation(X) -= m_grouped_layout ? scaled<coord_t>(plate->get_origin().x()) : bed_stride_x(m_plater) * ap.col;
+                    ap.translation(Y) += m_grouped_layout ? -scaled<coord_t>(plate->get_origin().y()) : bed_stride_y(m_plater) * ap.row;
                     m_unselected.emplace_back(ap);
                 }
                 else
@@ -147,10 +156,10 @@ void FillBedJob::prepare()
     bool enable_wrapping = global_config.option<ConfigOptionBool>("enable_wrapping_detection")->value;
     //add the virtual object into unselect list if has
     double scaled_exclusion_gap = scale_(1);
-    plate_list.preprocess_exclude_areas(params.excluded_regions, global_config, enable_wrapping, 1, scaled_exclusion_gap);
-    plate_list.preprocess_exclude_areas(m_unselected, global_config, enable_wrapping);
+    plate_list.preprocess_exclude_areas(params.excluded_regions, global_config, enable_wrapping, 1, scaled_exclusion_gap, plate);
+    plate_list.preprocess_exclude_areas(m_unselected, global_config, enable_wrapping, 1, 0, plate);
 
-    m_bedpts = get_bed_shape(*m_plater->config());
+    m_bedpts = get_bed_shape(m_plate_config);
 
     auto &objects = m_plater->model().objects;
     /*BoundingBox bedbb = get_extents(m_bedpts);
@@ -194,7 +203,7 @@ void FillBedJob::prepare()
     //int sel_id = m_plater->get_selection().get_instance_idx();
     // if the selection is not a single instance, choose the first as template
     //sel_id = std::max(sel_id, 0);
-    ModelInstance *mi = model_object->instances[sel_id];
+    ModelInstance *mi = model_object->instances[m_template_instance];
     ArrangePolygon template_ap = get_instance_arrange_poly(mi, global_config);
     set_arrange_polygon_bed_exclusion_extruders(template_ap, *model_object, *plate, global_config);
 
@@ -211,6 +220,10 @@ void FillBedJob::prepare()
             } else {
                 ModelObject* newObj = m_plater->model().add_object(*mo);
                 newObj->name = mo->name +" "+ std::to_string(p.itemid);
+                if (m_grouped_layout) {
+                    newObj->clear_instances();
+                    newObj->add_instance(*mi);
+                }
                 for (ModelInstance *new_instance : newObj->instances)
                     new_instance->apply_arrange_result(p.translation.cast<double>(), p.rotation);
             }
@@ -239,20 +252,21 @@ void FillBedJob::process(Ctl &ctl)
 
     if (m_object_idx == -1 || m_selected.empty()) return;
 
-    update_arrange_params(params, m_plater->config(), m_selected);
+    update_arrange_params(params, &m_plate_config, m_selected);
 
     auto &partplate_list               = m_plater->get_partplate_list();
     auto &print                        = wxGetApp().plater()->get_partplate_list().get_current_fff_print();
-    const Slic3r::DynamicPrintConfig& global_config = wxGetApp().preset_bundle->full_config();
+    const DynamicPrintConfig& global_config = m_plate_config;
     PresetBundle* preset_bundle = wxGetApp().preset_bundle;
-    const bool is_bbl = wxGetApp().preset_bundle->is_bbl_vendor();
+    const auto& profile = partplate_list.get_plate(m_plate_index)->printer_profile();
+    const bool is_bbl = profile.assigned() ? profile.is_bambu : preset_bundle->is_bbl_vendor();
     if (is_bbl && params.avoid_extrusion_cali_region && global_config.opt_bool("scan_first_layer"))
         partplate_list.preprocess_nonprefered_areas(m_unselected, MAX_NUM_PLATES);
 
-    update_selected_items_inflation(m_selected, m_plater->config(), params);
-    update_unselected_items_inflation(m_unselected, m_plater->config(), params);
+    update_selected_items_inflation(m_selected, &m_plate_config, params);
+    update_unselected_items_inflation(m_unselected, &m_plate_config, params);
     // After the inflation, which may give back part of the bed margin.
-    m_bedpts = get_shrink_bedpts(m_plater->config(), params);
+    m_bedpts = get_shrink_bedpts(&m_plate_config, params);
 
     bool do_stop = false;
     params.stopcondition = [&ctl, &do_stop]() {
@@ -353,7 +367,7 @@ void FillBedJob::finalize(bool canceled, std::exception_ptr &eptr)
     //BBS: partplate
     PartPlateList& plate_list = m_plater->get_partplate_list();
     int plate_cols = plate_list.get_plate_cols();
-    int cur_plate = plate_list.get_curr_plate_index();
+    int cur_plate = m_plate_index;
 
     size_t inst_cnt = model_object->instances.size();
 
@@ -378,8 +392,9 @@ void FillBedJob::finalize(bool canceled, std::exception_ptr &eptr)
             if (m_selected.size() <= 100) {
                 ap.row = ap.bed_idx / plate_cols;
                 ap.col = ap.bed_idx % plate_cols;
-                ap.translation(X) += bed_stride_x(m_plater) * ap.col;
-                ap.translation(Y) -= bed_stride_y(m_plater) * ap.row;
+                const Vec3d origin = plate_list.get_plate(m_plate_index)->get_origin();
+                ap.translation(X) += m_grouped_layout ? scaled<coord_t>(origin.x()) : bed_stride_x(m_plater) * ap.col;
+                ap.translation(Y) += m_grouped_layout ? scaled<coord_t>(origin.y()) : -bed_stride_y(m_plater) * ap.row;
             }
 
             ap.apply();

@@ -575,10 +575,11 @@ public:
 protected:
     bool accepts_3mf() const override { return takes_3mf; }
 
-    bool print_uploaded_file(const PrintParams& params, const std::string& filename) override
+    bool print_uploaded_file(const PrintParams& params, const std::string& filename,
+                             const std::string& base_url, const std::string& api_key) override
     {
         printed = filename;
-        return MoonrakerPrinterAgent::print_uploaded_file(params, filename);
+        return MoonrakerPrinterAgent::print_uploaded_file(params, filename, base_url, api_key);
     }
 };
 
