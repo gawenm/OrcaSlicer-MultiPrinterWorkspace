@@ -4,6 +4,7 @@
 #include <catch2/catch_message.hpp>
 #include <catch2/catch_tostring.hpp>
 #include <boost/filesystem/operations.hpp>
+#include "libslic3r/Layer.hpp"
 #include "libslic3r/BoundingBox.hpp"
 #include "libslic3r/Config.hpp"
 #include "libslic3r/calib.hpp"
