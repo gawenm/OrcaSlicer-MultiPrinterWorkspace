@@ -2702,6 +2702,9 @@ TEST_CASE("A project restores each plate's printer, process and G-code", "[3mf][
     Model model;
     REQUIRE(load_stl((std::string(TEST_DATA_DIR) + "/test_3mf/Prusa.stl").c_str(), &model));
     model.add_default_instances();
+    auto* object = model.objects.front();
+    for (int i = 1; i < 5; ++i)
+        object->add_instance()->set_offset(Vec3d(20. * i, 0., 0.));
     ScopedTemporaryDir backup_dir("orca_plate_printers");
     model.set_backup_path(backup_dir.string());
     ScopedTemporaryFile file(".3mf");
@@ -2747,11 +2750,24 @@ TEST_CASE("A project restores each plate's printer, process and G-code", "[3mf][
     REQUIRE(bambu.printer_profile.valid());
     REQUIRE(klipper.printer_profile.valid());
 
+    PlateData second_bambu, second_belt;
+    second_bambu.plate_index = 3;
+    second_bambu.printer_profile = bambu.printer_profile;
+    second_bambu.printer_profile.config.set("print_settings_id", "P1S fine", true);
+    second_bambu.printer_profile.config.set("enable_support", true);
+    second_belt.plate_index = 4;
+    second_belt.printer_profile = klipper.printer_profile;
+    second_belt.printer_profile.config.set_key_value("filament_settings_id", new ConfigOptionStrings({"Belt PETG"}));
+    bambu.objects_and_instances.emplace_back(0, 1);
+    klipper.objects_and_instances.emplace_back(0, 2);
+    second_bambu.objects_and_instances.emplace_back(0, 3);
+    second_belt.objects_and_instances.emplace_back(0, 4);
+
     StoreParams params;
     params.path = path.c_str();
     params.model = &model;
     params.config = &project;
-    params.plate_data_list = {&bambu, &klipper, &inherited};
+    params.plate_data_list = {&bambu, &klipper, &inherited, &second_bambu, &second_belt};
     params.strategy = SaveStrategy::SplitModel | SaveStrategy::Silence;
     REQUIRE(store_bbs_3mf(params));
 
@@ -2766,7 +2782,15 @@ TEST_CASE("A project restores each plate's printer, process and G-code", "[3mf][
     REQUIRE(load_bbs_3mf(path.c_str(), &loaded_config, &substitutions, &loaded_model, &plates,
                          &presets, &is_bbl_3mf, &is_orca_3mf, &version, nullptr,
                          LoadStrategy::LoadModel | LoadStrategy::LoadConfig));
-    REQUIRE(plates.size() == 3);
+    REQUIRE(plates.size() == 5);
+    REQUIRE(loaded_model.objects.size() == 1);
+    REQUIRE(loaded_model.objects.front()->instances.size() == object->instances.size());
+    for (size_t i = 0; i < object->instances.size(); ++i)
+        CHECK(loaded_model.objects.front()->instances[i]->loaded_id == object->instances[i]->id().id);
+    CHECK(plates[0]->obj_inst_map.size() == 2);
+    CHECK(plates[3]->printer_profile.config.opt_string("print_settings_id") == "P1S fine");
+    CHECK(plates[3]->printer_profile.config.opt_bool("enable_support"));
+    CHECK(plates[4]->printer_profile.config.option<ConfigOptionStrings>("filament_settings_id")->values.front() == "Belt PETG");
     CHECK(loaded_config.opt_string("printer_settings_id") == "Project printer");
     CHECK(plates[0]->printer_profile.row_printer_name("Project printer") == "P1S");
     CHECK(plates[1]->printer_profile.row_printer_name("Project printer") == "CR-30");

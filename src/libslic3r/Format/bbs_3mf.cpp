@@ -2279,7 +2279,7 @@ void PlateData::parse_filament_info(GCodeProcessorResult *result)
                 return false;
             }
             if (current_plate_data) {
-                std::map<int, std::pair<int, int>>::iterator it = current_plate_data->obj_inst_map.find(object.first.second);
+                auto it = current_plate_data->obj_inst_map.find(object.first.second);
                 if (it == current_plate_data->obj_inst_map.end()) {
                     //not in current plate, skip
                     BOOST_LOG_TRIVIAL(info) << __FUNCTION__ << ":" << __LINE__ << boost::format(", could not find object %1% in plate %2%, skip it\n")%object.first.second %plate_id;
@@ -2531,7 +2531,7 @@ void PlateData::parse_filament_info(GCodeProcessorResult *result)
             it++;
 
             //update the arrange order
-            std::map<int, std::pair<int, int>>::iterator map_it = current_plate_data->obj_inst_map.begin();
+            auto map_it = current_plate_data->obj_inst_map.begin();
             while (map_it != current_plate_data->obj_inst_map.end()) {
                 int obj_index, obj_id = map_it->first, inst_index = map_it->second.first;
                 IndexToPathMap::iterator index_iter = m_index_paths.find(obj_id);
