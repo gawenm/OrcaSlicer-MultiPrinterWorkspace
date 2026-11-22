@@ -7209,7 +7209,7 @@ void PartPlateList::update_printer_profile_layout()
         const BoundingBoxf bounds = shape.empty() ?
             BoundingBoxf(Vec2d::Zero(), Vec2d(m_plate_width, m_plate_depth)) : get_extents(shape);
         envelope.merge(bounds);
-        const std::string preset = profile.assigned() ? profile.config.opt_string("printer_settings_id") : project_preset;
+        const std::string preset = profile.row_printer_name(project_preset);
         const double labels = (PROFILE_PLATE_LABEL_LINES * PARTPLATE_EDIT_PLATE_NAME_ICON_SIZE +
             PARTPLATE_TEXT_OFFSET_Y) * double(plate_icon_scale_factor(bounds));
         const bool bambu = profile.assigned() ? profile.is_bambu : bundle && bundle->is_bbl_vendor();
@@ -8813,6 +8813,10 @@ int PartPlateList::load_from_3mf_structure(PlateDataPtrs& plate_data_list, int f
 	}
 	clear(true, true);
 	set_filament_count(filament_count);
+    // Building the list can trigger layout updates. Keep instances at their
+    // saved positions until all plate origins have been restored.
+    m_printer_profile_layout_pending = std::any_of(plate_data_list.begin(), plate_data_list.end(),
+        [](const PlateData* data) { return data->printer_profile.assigned(); });
 	for (unsigned int i = 0; i < (unsigned int)plate_data_list.size(); ++i)
 	{
 		int index = create_plate(false);

@@ -969,8 +969,11 @@ void PrintObject::slice()
             << " object=" << this->model_object()->name;
         if (pcfg.belt_printer.value) {
 
+            // Layer Z tracks physical position along the belt, not the virtual
+            // multi-plate workspace placement. Remove the plate origin BEFORE
+            // rotation mixes the belt direction into Z.
             Point inst_shift = this->instances().empty() ? Point(0, 0)
-                : this->instances().front().shift - this->center_offset();
+                : this->instances().front().shift_without_plate_offset() - this->center_offset();
             BOOST_LOG_TRIVIAL(trace) << "Belt global: object " << this->model_object()->name
                 << " instances=" << this->instances().size()
                 << " shift=(" << unscale<double>(inst_shift.x()) << ", " << unscale<double>(inst_shift.y()) << ")";

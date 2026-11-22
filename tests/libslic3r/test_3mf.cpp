@@ -2768,6 +2768,9 @@ TEST_CASE("A project restores each plate's printer, process and G-code", "[3mf][
                          LoadStrategy::LoadModel | LoadStrategy::LoadConfig));
     REQUIRE(plates.size() == 3);
     CHECK(loaded_config.opt_string("printer_settings_id") == "Project printer");
+    CHECK(plates[0]->printer_profile.row_printer_name("Project printer") == "P1S");
+    CHECK(plates[1]->printer_profile.row_printer_name("Project printer") == "CR-30");
+    CHECK(plates[2]->printer_profile.row_printer_name("Project printer") == "Project printer");
     const auto& first = plates[0]->printer_profile;
     const auto& second = plates[1]->printer_profile;
     REQUIRE(first.valid());

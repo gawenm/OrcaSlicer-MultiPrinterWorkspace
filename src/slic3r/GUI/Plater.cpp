@@ -4096,6 +4096,21 @@ void Sidebar::refresh_plate_presets(bool preset_catalog_changed)
             update_filaments_area_height();
             p->scrolled->Layout();
         }
+        if (plate && p->plater->get_partplate_list().has_printer_profiles()) {
+            if (was_assigned || preset_catalog_changed || !p->combo_printer->has_plate_choices()) {
+                const auto& printer = bundle.printers.get_edited_preset();
+                p->combo_printer->set_plate_choices(
+                    plate_preset_names(bundle.printers, bundle.printers.get_edited_preset_with_vendor_profile()),
+                    printer.name, [this](const std::string& name) {
+                        auto* selected = selected_print_plate(p->plater);
+                        if (selected && !selected->printer_profile().assigned() &&
+                            p->plater->get_partplate_list().has_printer_profiles())
+                            p->plater->set_plate_preset(Preset::TYPE_PRINTER, name);
+                    });
+            }
+        } else {
+            p->combo_printer->clear_plate_choices();
+        }
         return;
     }
 
@@ -23671,10 +23686,32 @@ bool Plater::plugins_block_slicing() const
     return has_missing_plugins() || has_inactive_plugins() || has_broken_plugins();
 }
 
+// Resolve compatibility from this plate's saved process and materials.
+static PlatePrinterProfile change_plate_machine(const PresetBundle& bundle, const PlatePrinterProfile& current,
+                                                const std::string& name)
+{
+    PresetBundle staged(bundle);
+    if (current.assigned())
+        staged.load_config_model("Plate settings.3mf", current.config);
+    staged.printers.select_preset_by_name(name, true);
+    if (staged.printers.get_selected_preset_name() != name)
+        return {};
+    staged.update_compatible(PresetSelectCompatibleType::Always);
+    staged.update_multi_material_filament_presets();
+    const auto bed_type = staged.printers.get_edited_preset().get_default_bed_type(&staged);
+    staged.project_config.set_key_value("curr_bed_type", new ConfigOptionEnum<BedType>(bed_type));
+    PlatePrinterProfile profile{staged.full_config(false), staged.is_bbl_vendor()};
+    profile.config.update_plugin_manifest();
+    profile.remove_local_settings();
+    return profile;
+}
+
 void Plater::open_platesettings_dialog(wxCommandEvent& evt) {
     int plate_index = evt.GetInt();
     PlateSettingsDialog dlg(this, _L("Plate Settings"), evt.GetString() == "only_layer_sequence");
-    PartPlate* curr_plate = p->partplate_list.get_curr_plate();
+    PartPlate* curr_plate = p->partplate_list.get_plate(plate_index);
+    if (!curr_plate)
+        return;
     const auto& saved_profile = curr_plate->printer_profile();
     PresetBundle& bundle = *wxGetApp().preset_bundle;
     const auto current_name = bundle.printers.get_edited_preset().name;
@@ -23717,8 +23754,7 @@ void Plater::open_platesettings_dialog(wxCommandEvent& evt) {
 
     dlg.sync_spiral_mode(curr_plate->get_spiral_vase_mode(), !curr_plate->has_spiral_mode_config());
 
-    dlg.Bind(EVT_SET_BED_TYPE_CONFIRM, [this, plate_index, &dlg](wxCommandEvent& e) {
-        PartPlate* curr_plate = p->partplate_list.get_curr_plate();
+    dlg.Bind(EVT_SET_BED_TYPE_CONFIRM, [this, plate_index, curr_plate, &dlg](wxCommandEvent& e) {
         BedType old_bed_type = curr_plate->get_bed_type();
         auto bt_sel = dlg.get_bed_type_choice();
         if (old_bed_type != bt_sel) {
@@ -23781,19 +23817,14 @@ void Plater::open_platesettings_dialog(wxCommandEvent& evt) {
         profile = {bundle.full_config(false), bundle.is_bbl_vendor()};
     } else if (choice >= installed_offset) {
         const std::string& name = installed_profiles.at(choice - installed_offset);
-        PresetBundle staged(bundle);
-        staged.printers.select_preset_by_name(name, true);
-        if (staged.printers.get_selected_preset_name() != name) {
-            show_error(this, _L("The selected printer profile is unavailable."));
+        try {
+            profile = change_plate_machine(bundle, saved_profile, name);
+        } catch (const std::exception& error) {
+            show_error(this, from_u8(error.what()));
             return;
         }
-        staged.update_compatible(PresetSelectCompatibleType::Always);
-        staged.update_multi_material_filament_presets();
-        const auto bed_type = staged.printers.get_edited_preset().get_default_bed_type(&staged);
-        staged.project_config.set_key_value("curr_bed_type", new ConfigOptionEnum<BedType>(bed_type));
-        profile = {staged.full_config(false), staged.is_bbl_vendor()};
     }
-    if (profile.assigned()) {
+    if (choice == capture_choice) {
         profile.config.update_plugin_manifest();
         profile.remove_local_settings();
     }
@@ -23980,7 +24011,7 @@ void Plater::update_plates_using_printer_preset(const std::string& previous_name
 void Plater::set_plate_preset(Preset::Type type, const std::string& name, size_t slot)
 {
     auto* plate = selected_print_plate(this);
-    if (!plate || !plate->printer_profile().assigned())
+    if (!plate || (!plate->printer_profile().assigned() && type != Preset::TYPE_PRINTER))
         return;
     if (p->background_process.running() || p->background_process.is_export_scheduled() || !get_ui_job_worker().is_idle()) {
         show_error(this, _L("Wait for the current operation to finish before changing plate presets."));
@@ -23996,19 +24027,39 @@ void Plater::set_plate_preset(Preset::Type type, const std::string& name, size_t
     if (!preset || preset->name != name || (is_printer && preset->printer_technology() != ptFFF))
         return;
 
-    try {
-        PresetBundle staged(bundle);
-        staged.load_config_model("Plate settings.3mf", profile.config);
-        if (is_printer) {
-            staged.printers.select_preset_by_name(name, true);
-            if (staged.printers.get_selected_preset_name() != name)
-                return;
-            staged.update_compatible(PresetSelectCompatibleType::Always);
-            staged.update_multi_material_filament_presets();
-            const auto bed_type = staged.printers.get_edited_preset().get_default_bed_type(&staged);
-            staged.project_config.set_key_value("curr_bed_type", new ConfigOptionEnum<BedType>(bed_type));
-            profile = {staged.full_config(false), staged.is_bbl_vendor()};
-        } else {
+    if (is_printer) {
+        const auto& project_name = bundle.printers.get_edited_preset().name;
+        const auto row = profile.row_printer_name(project_name);
+        if (row == name)
+            return;
+        std::vector<std::pair<PartPlate*, PlatePrinterProfile>> updates;
+        try {
+            for (auto* member : p->partplate_list.get_plate_list()) {
+                const auto& current = member->printer_profile();
+                if (current.row_printer_name(project_name) != row)
+                    continue;
+                auto replacement = change_plate_machine(bundle, current, name);
+                if (!replacement.valid()) {
+                    show_error(this, _L("The selected printer profile does not contain a complete FFF configuration."));
+                    return;
+                }
+                updates.emplace_back(member, std::move(replacement));
+            }
+        } catch (const std::exception& error) {
+            show_error(this, from_u8(error.what()));
+            return;
+        }
+        take_snapshot(_u8L("Change printer for plate row"));
+        p->partplate_list.reload_all_objects();
+        for (auto& [member, replacement] : updates) {
+            member->set_printer_profile(std::move(replacement));
+            member->invalidate_exclusion_volume_preview();
+        }
+        p->partplate_list.refresh_printer_profile_layout(true);
+    } else {
+        try {
+            PresetBundle staged(bundle);
+            staged.load_config_model("Plate settings.3mf", profile.config);
             const auto& choices = is_process ? staged.prints : staged.filaments;
             const auto* candidate = choices.find_preset(name, false);
             if (!candidate || candidate->name != name)
@@ -24048,25 +24099,21 @@ void Plater::set_plate_preset(Preset::Type type, const std::string& name, size_t
                 updated.option<ConfigOptionStrings>("filament_settings_id", true)->values = std::move(filament_names);
                 profile.config = std::move(updated);
             }
-        }
 
-        profile.config.update_plugin_manifest();
-        profile.remove_local_settings();
-        if (!profile.valid()) {
-            show_error(this, _L("The updated plate configuration is incomplete."));
+            profile.config.update_plugin_manifest();
+            profile.remove_local_settings();
+            if (!profile.valid()) {
+                show_error(this, _L("The updated plate configuration is incomplete."));
+                return;
+            }
+        } catch (const std::exception& error) {
+            show_error(this, from_u8(error.what()));
             return;
         }
-    } catch (const std::exception& error) {
-        show_error(this, from_u8(error.what()));
-        return;
-    }
 
-    take_snapshot(_u8L("Change plate preset"));
-    if (is_printer)
-        p->partplate_list.reload_all_objects();
-    plate->set_printer_profile(std::move(profile), is_printer);
-    if (is_printer)
-        p->partplate_list.refresh_printer_profile_layout();
+        take_snapshot(_u8L("Change plate preset"));
+        plate->set_printer_profile(std::move(profile), false);
+    }
     set_plater_dirty(true);
     mark_plate_toolbar_image_dirty();
     update();

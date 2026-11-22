@@ -83,6 +83,10 @@ struct PlatePrinterProfile
     bool is_bambu = false;
 
     bool assigned() const { return !config.empty(); }
+    std::string row_printer_name(const std::string& project_printer) const
+    {
+        return assigned() ? config.opt_string("printer_settings_id") : project_printer;
+    }
     bool valid() const;
     void remove_local_settings();
 };
