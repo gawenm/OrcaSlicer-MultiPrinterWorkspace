@@ -3083,8 +3083,13 @@ std::vector<int> PartPlate::get_extruders(bool conside_custom_gcode, bool expand
     if (check_objects_empty_and_gcode3mf(plate_extruders)) {
         return plate_extruders;
     }
-	if (m_printer_profile.assigned())
-		return get_extruders(conside_custom_gcode, m_printer_profile.config, m_printer_profile.config, expand_mixed_slots);
+	if (m_printer_profile.assigned()) {
+		// Resolve support and material slots against the exact effective plate config
+		// passed to Print::apply(), including plate-local process overrides.
+		DynamicPrintConfig effective = m_printer_profile.config;
+		effective.apply(m_config);
+		return get_extruders(conside_custom_gcode, effective, effective, expand_mixed_slots);
+	}
 	return get_extruders(conside_custom_gcode, wxGetApp().preset_bundle->prints.get_edited_preset().config, wxGetApp().preset_bundle->project_config, expand_mixed_slots);
 }
 
