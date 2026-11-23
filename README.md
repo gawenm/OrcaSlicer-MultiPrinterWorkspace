@@ -1,3 +1,15 @@
+# OrcaSlicer Multi-Printer Workspace downloads
+
+MPW build `340dff40` · 2.6.0-dev
+
+| Platform | Download |
+| --- | --- |
+| Windows x64 | [Installer](https://github.com/gawenm/OrcaSlicer-MultiPrinterWorkspace/actions/runs/45100417050/artifacts/14790094913) · [Portable](https://github.com/gawenm/OrcaSlicer-MultiPrinterWorkspace/actions/runs/45100417050/artifacts/14790368981) · [MSIX](https://github.com/gawenm/OrcaSlicer-MultiPrinterWorkspace/actions/runs/45100417050/artifacts/14790822578) |
+| Linux x86_64 | [AppImage](https://github.com/gawenm/OrcaSlicer-MultiPrinterWorkspace/actions/runs/45100417050/artifacts/14787837380) · [Flatpak](https://github.com/gawenm/OrcaSlicer-MultiPrinterWorkspace/actions/runs/45100417050/artifacts/14788042193) |
+| Linux ARM64 | [AppImage](https://github.com/gawenm/OrcaSlicer-MultiPrinterWorkspace/actions/runs/45100417050/artifacts/14787057816) · [Flatpak](https://github.com/gawenm/OrcaSlicer-MultiPrinterWorkspace/actions/runs/45100417050/artifacts/14786599402) |
+
+Sign in to GitHub to download a build archive, then extract it to access the package. These [tested build artifacts](https://github.com/gawenm/OrcaSlicer-MultiPrinterWorkspace/actions/runs/45100417050) expire on February 21, 2027.
+
 <div align="center">
 
 <picture>
