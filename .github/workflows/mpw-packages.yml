@@ -1,0 +1,58 @@
+name: Publish tested MPW packages
+on:
+  push:
+    branches: [main]
+    paths: ['.github/workflows/mpw-packages.yml']
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  actions: read
+  packages: write
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: windows-x64-installer
+            artifact: 14790094913
+          - name: windows-x64-portable
+            artifact: 14790368981
+          - name: windows-x64-msix
+            artifact: 14790822578
+          - name: linux-x64-appimage
+            artifact: 14787837380
+          - name: linux-arm64-appimage
+            artifact: 14787057816
+          - name: linux-x64-flatpak
+            artifact: 14788042193
+          - name: linux-arm64-flatpak
+            artifact: 14786599402
+    steps:
+      - uses: oras-project/setup-oras@22ce207df3b08e061f537244349aac6ae1d214f6
+      - name: Verify and publish the tested archive
+        env:
+          GH_TOKEN: ${{ github.token }}
+          ARTIFACT: ${{ matrix.artifact }}
+          PACKAGE: ${{ matrix.name }}
+        run: |
+          set -euo pipefail
+          api="repos/$GITHUB_REPOSITORY/actions/artifacts/$ARTIFACT"
+          meta=$(gh api "$api")
+          jq -e '.expired == false and .workflow_run.id == 45100417050 and .workflow_run.head_sha == "340dff407afdfda5954fcf59adec646f24ac9eba"' <<< "$meta"
+          archive="orca-mpw-$PACKAGE.zip"
+          gh api "$api/zip" > "$archive"
+          digest=$(jq -er '.digest | sub("^sha256:";"")' <<< "$meta")
+          echo "$digest  $archive" | sha256sum --check
+          echo "$GH_TOKEN" | oras login ghcr.io -u "$GITHUB_ACTOR" --password-stdin
+          ref="ghcr.io/${GITHUB_REPOSITORY_OWNER,,}/orca-mpw-$PACKAGE:2.6.0-dev-340dff40"
+          oras push "$ref" \
+            --artifact-type application/vnd.orca-mpw.distribution.v1 \
+            --annotation "org.opencontainers.image.source=$GITHUB_SERVER_URL/$GITHUB_REPOSITORY" \
+            --annotation "org.opencontainers.image.description=OrcaSlicer MPW $PACKAGE download" \
+            --annotation "org.opencontainers.image.revision=340dff407afdfda5954fcf59adec646f24ac9eba" \
+            "$archive:application/zip"
+          oras manifest fetch "$ref" | jq -e --arg digest "sha256:$digest" '.layers | any(.digest == $digest)'
