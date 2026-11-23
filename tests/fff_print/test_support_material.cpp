@@ -301,6 +301,21 @@ TEST_CASE("Three raft layers are created", "[SupportMaterial]")
     REQUIRE(print.objects().front()->support_layers().size() == 3);
 }
 
+TEST_CASE("A closed cube on the bed produces no support layers", "[SupportMaterial][Regression]")
+{
+    for (int enable_support : {0, 1}) {
+        CAPTURE(enable_support);
+        Slic3r::Print print;
+        Slic3r::Test::init_and_process_print({ cube(20) }, print, {
+            {"enable_support", enable_support},
+            {"raft_layers", 0},
+            {"enforce_support_layers", 0}
+        });
+        REQUIRE(print.objects().size() == 1);
+        CHECK(print.objects().front()->support_layers().empty());
+    }
+}
+
 TEST_CASE("Enforced support layers are generated", "[SupportMaterial]")
 {
     // enforce_support_layers forces support on the first N layers even with support off.

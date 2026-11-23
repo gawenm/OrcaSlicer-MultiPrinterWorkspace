@@ -3016,8 +3016,13 @@ std::vector<int> PartPlate::get_extruders(bool conside_custom_gcode, bool expand
     if (check_objects_empty_and_gcode3mf(plate_extruders)) {
         return plate_extruders;
     }
-	if (m_printer_profile.assigned())
-		return get_extruders(conside_custom_gcode, m_printer_profile.config, m_printer_profile.config, expand_mixed_slots);
+	if (m_printer_profile.assigned()) {
+		// Resolve support and material slots against the exact effective plate config
+		// passed to Print::apply(), including plate-local process overrides.
+		DynamicPrintConfig effective = m_printer_profile.config;
+		effective.apply(m_config);
+		return get_extruders(conside_custom_gcode, effective, effective, expand_mixed_slots);
+	}
 	return get_extruders(conside_custom_gcode, wxGetApp().preset_bundle->prints.get_edited_preset().config, wxGetApp().preset_bundle->project_config, expand_mixed_slots);
 }
 
@@ -6552,6 +6557,7 @@ void PartPlateList::clear(bool delete_plates, bool release_print_list, bool exce
 		m_plate_list.clear();
 		m_printer_profile_pitch.setZero();
 		m_printer_profile_offsets.clear();
+        m_loading_instance_plates.clear();
 		m_printer_profile_layout_pending = false;
 		m_current_plate = 0;
 	}
@@ -7164,7 +7170,7 @@ void PartPlateList::update_printer_profile_layout()
         const BoundingBoxf bounds = shape.empty() ?
             BoundingBoxf(Vec2d::Zero(), Vec2d(m_plate_width, m_plate_depth)) : get_extents(shape);
         envelope.merge(bounds);
-        const std::string preset = profile.assigned() ? profile.config.opt_string("printer_settings_id") : project_preset;
+        const std::string preset = profile.row_printer_name(project_preset);
         const double labels = (PROFILE_PLATE_LABEL_LINES * PARTPLATE_EDIT_PLATE_NAME_ICON_SIZE +
             PARTPLATE_TEXT_OFFSET_Y) * double(plate_icon_scale_factor(bounds));
         const bool bambu = profile.assigned() ? profile.is_bambu : bundle && bundle->is_bbl_vendor();
@@ -7222,9 +7228,10 @@ void PartPlateList::finish_loading_printer_profile_layout()
     if (!m_printer_profile_layout_pending)
         return;
 
-    // Use the saved bed positions to recover membership before moving any model.
+    // Legacy instances without a saved ID use their saved bed position.
     reload_all_objects();
     m_printer_profile_layout_pending = false;
+    m_loading_instance_plates.clear();
     refresh_printer_profile_layout(true);
 }
 
@@ -7710,7 +7717,14 @@ int PartPlateList::reload_all_objects(bool except_locked, int plate_index)
 		{
 			ModelInstance* instance = object->instances[j];
 			BoundingBoxf3 boundingbox = object->instance_convex_hull_bounding_box(j);
-			for (k = 0; k < (unsigned int)m_plate_list.size(); ++k)
+			if (m_printer_profile_layout_pending && instance->loaded_id != 0) {
+                auto owner = m_loading_instance_plates.find(instance->loaded_id);
+                if (owner != m_loading_instance_plates.end() && owner->second >= 0) {
+                    m_plate_list[owner->second]->add_instance(i, j, false, &boundingbox);
+                    continue;
+                }
+            }
+            for (k = 0; k < (unsigned int)m_plate_list.size(); ++k)
 			{
 				PartPlate* plate = m_plate_list[k];
 				assert(plate != NULL);
@@ -8766,14 +8780,31 @@ int PartPlateList::load_from_3mf_structure(PlateDataPtrs& plate_data_list, int f
 		BOOST_LOG_TRIVIAL(error) << __FUNCTION__ << boost::format(":no plates, should not happen!");
 		return -1;
 	}
+    if (plate_data_list.size() > MAX_PLATES_COUNT ||
+        std::any_of(plate_data_list.begin(), plate_data_list.end(), [](const PlateData* data) { return data == nullptr; }))
+        return -1;
 	clear(true, true);
 	set_filament_count(filament_count);
+    // Building the list can trigger layout updates. Keep instances at their
+    // saved positions until all plate origins have been restored.
+    m_printer_profile_layout_pending = std::any_of(plate_data_list.begin(), plate_data_list.end(),
+        [](const PlateData* data) { return data->printer_profile.assigned(); });
 	for (unsigned int i = 0; i < (unsigned int)plate_data_list.size(); ++i)
 	{
 		int index = create_plate(false);
 		// Restore the printer context before constructing the plate's print state.
 		// get_print() below must see the saved machine, not the project default.
 		m_plate_list[index]->m_printer_profile = plate_data_list[i]->printer_profile;
+        if (m_printer_profile_layout_pending) {
+            for (const auto& entry : plate_data_list[i]->obj_inst_map) {
+                const int saved_id = entry.second.second;
+                if (saved_id <= 0)
+                    continue;
+                auto [owner, inserted] = m_loading_instance_plates.emplace(size_t(saved_id), index);
+                if (!inserted && owner->second != index)
+                    owner->second = -1;
+            }
+        }
 		m_plate_list[index]->m_locked = plate_data_list[i]->locked;
 		m_plate_list[index]->config()->apply(plate_data_list[i]->config);
 		m_plate_list[index]->set_plate_name(plate_data_list[i]->plate_name);
@@ -8930,12 +8961,13 @@ int PartPlateList::load_from_3mf_structure(PlateDataPtrs& plate_data_list, int f
 			calc_bounding_boxes();
 			Vec2d position = get_current_shape_position();
 			m_plater->set_bed_position(position);
-		} else {
-			finish_loading_printer_profile_layout();
 		}
 	}
 	print();
-	ret = reload_all_objects();
+    if (!m_plater && m_printer_profile_layout_pending)
+        finish_loading_printer_profile_layout();
+    else
+        ret = reload_all_objects();
 	print();
 
 	return ret;

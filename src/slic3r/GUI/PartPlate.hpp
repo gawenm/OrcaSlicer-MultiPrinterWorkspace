@@ -810,6 +810,7 @@ class PartPlateList : public ObjectBase
     Vec2d m_printer_profile_pitch = Vec2d::Zero();
     std::vector<Vec2d> m_printer_profile_offsets;
     bool m_printer_profile_layout_pending = false;
+    std::map<size_t, int> m_loading_instance_plates;
     void update_printer_profile_layout();
     void position_plate(PartPlate& plate, Vec3d origin, bool move_instances, bool clear, bool keep_local = false);
     void set_plate_shape(PartPlate& plate, Vec2d position);

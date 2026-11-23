@@ -83,6 +83,10 @@ struct PlatePrinterProfile
     bool is_bambu = false;
 
     bool assigned() const { return !config.empty(); }
+    std::string row_printer_name(const std::string& project_printer) const
+    {
+        return assigned() ? config.opt_string("printer_settings_id") : project_printer;
+    }
     bool valid() const;
     void remove_local_settings();
 };
@@ -109,7 +113,7 @@ struct PlateData
 
     int plate_index;
     std::vector<std::pair<int, int>> objects_and_instances;
-    std::map<int, std::pair<int, int>> obj_inst_map;
+    std::multimap<int, std::pair<int, int>> obj_inst_map;
     std::string     printer_model_id;
     std::string     nozzle_diameters;
     std::string     nozzle_volume_types;
