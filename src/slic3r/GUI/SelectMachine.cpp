@@ -3671,7 +3671,9 @@ void SelectMachineDialog::on_send_print()
             return false;
         if (plate->printer_profile().assigned() && m_plate_agent_id == BBL_PRINTER_AGENT_ID)
             return plate->printer_profile().physical_printer_id == m_plate_device_id &&
-                (m_plate_device_id.empty() || obj_->get_dev_id() == m_plate_device_id);
+                (m_plate_device_id.empty() || obj_->get_dev_id() == m_plate_device_id) &&
+                plate_device_compatibility(plate->printer_profile(), bundle, *obj_) !=
+                    PlateDeviceCompatibility::Incompatible;
         if (plate->printer_profile().assigned() && m_plate_agent_id != BBL_PRINTER_AGENT_ID) {
             const auto* config = plate_print_host_config(plate, bundle);
             return config && plate_print_host_device_id(*config) == m_plate_device_id &&
@@ -4420,9 +4422,11 @@ void SelectMachineDialog::on_selection_changed(wxCommandEvent &event)
         }
     }
 
-    if (obj && !obj->get_lan_mode_connection_state()) {
-        obj->command_get_version();
-        obj->command_request_push_all();
+    if (obj) {
+        if (!obj->get_lan_mode_connection_state()) {
+            obj->command_get_version();
+            obj->command_request_push_all();
+        }
         if ((!dev->get_selected_machine() || dev->get_selected_machine()->get_dev_id() != m_printer_last_select) &&
             !dev->set_selected_machine(m_printer_last_select))
             return;
