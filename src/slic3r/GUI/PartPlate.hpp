@@ -125,7 +125,7 @@ private:
 
     std::set<std::pair<int, int>> obj_to_instance_set;
     std::set<std::pair<int, int>> instance_outside_set;
-    int m_plate_index;
+    int m_plate_index{-1};
     Vec3d m_origin;
     int m_width;
     int m_depth;

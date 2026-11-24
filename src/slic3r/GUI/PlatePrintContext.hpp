@@ -10,11 +10,33 @@
 #include "libslic3r/PresetBundle.hpp"
 #include "slic3r/Utils/NetworkAgentFactory.hpp"
 
+#include <utility>
+#include <vector>
+
 namespace Slic3r::GUI {
 
 inline PartPlate* selected_print_plate(Plater* plater)
 {
     return plater ? plater->get_partplate_list().get_selected_plate() : nullptr;
+}
+
+// Preserve the project printer when a workspace starts using plate printers.
+// Prepare all copies before changing any plate so allocation errors cannot
+// leave half of a row following a different printer.
+inline bool capture_inherited_plate_profiles(const std::vector<PartPlate*>& plates,
+                                             PlatePrinterProfile project_profile)
+{
+    if (!project_profile.valid())
+        return false;
+    project_profile.remove_local_settings();
+
+    std::vector<std::pair<PartPlate*, PlatePrinterProfile>> captures;
+    for (PartPlate* plate : plates)
+        if (plate && !plate->printer_profile().assigned())
+            captures.emplace_back(plate, project_profile);
+    for (auto& [plate, profile] : captures)
+        plate->set_printer_profile(std::move(profile), false);
+    return true;
 }
 
 inline std::string plate_printer_model_id(const DynamicPrintConfig& config, const PresetBundle& bundle)
