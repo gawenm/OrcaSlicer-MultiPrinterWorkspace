@@ -45,6 +45,12 @@ TEST_CASE("Assigned plates use the installed printer preset for networking", "[p
     CHECK(plate_printer_agent_id(&ender, bundle) == MOONRAKER_PRINTER_AGENT_ID);
     CHECK(plate_print_host_device_id(*ender_config) == "ender.example.test");
 
+    bundle.printers.select_preset_by_name("Test Ender", true);
+    auto& edited = bundle.printers.get_edited_preset().config;
+    edited.opt_string("print_host", true) = "new-ender.example.test";
+    CHECK(plate_print_host_device_id(*plate_print_host_config(&ender, bundle)) == "new-ender.example.test");
+    CHECK(plate_print_host_device_id(*plate_print_host_config(&belt, bundle)) == "belt.example.test:7125");
+
     auto* bambu_host_config = plate_print_host_config(&bambu, bundle);
     REQUIRE(bambu_host_config != nullptr);
     bambu_host_config->set_key_value("bbl_use_printhost", new ConfigOptionBool(true));
