@@ -277,6 +277,25 @@ TEST_CASE("Logging out cancels a pending last-machine restore", "[DeviceManager]
     CHECK_FALSE(manager.has_pending_last_machine_restore());
 }
 
+TEST_CASE("A plate restore does not fall back to another remembered device", "[DeviceManager][integration]")
+{
+    ScopedAppConfig app_config;
+    auto agent = std::make_shared<TestPrinterAgent>("integration-agent");
+    NetworkAgent network(nullptr, agent);
+    network.set_printer_agent(agent);
+    DeviceManager manager(&network, false, &app_config.config);
+    manager.record_user_last_machine("integration-device");
+
+    manager.restore_plate_machine("plate-specific-device");
+    REQUIRE(manager.has_pending_last_machine_restore());
+    const std::uint64_t generation = network.get_user_machine_list_generation();
+    manager.parse_user_print_info(machine_list_response(ORCA_CLOUD_PROVIDER, "integration-agent", generation, "Other device"));
+    CHECK_FALSE(manager.has_pending_last_machine_restore());
+    CHECK(manager.get_user_machinelist().count("integration-device") == 1);
+    CHECK(manager.get_user_last_machine() == "integration-device");
+    CHECK(manager.get_selected_machine() == nullptr);
+}
+
 TEST_CASE("A CA file stays with the agent that saved it when a device is rebound", "[DeviceManager][integration]")
 {
     ScopedAppConfig app_config;

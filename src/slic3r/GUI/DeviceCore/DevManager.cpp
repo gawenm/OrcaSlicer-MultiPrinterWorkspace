@@ -627,6 +627,7 @@ namespace Slic3r
         userMachineList.clear();
         // A machine list that arrives for the signed-out account must not reselect its printer.
         m_restore_last_machine = false;
+        m_restore_plate_machine.clear();
 
         if (!keep_selected_machine) {
             // The printer signing out deselects is not reconnected at the next start either. Its
@@ -682,6 +683,7 @@ namespace Slic3r
         }
 
         m_restore_last_machine = false; // any selection settles a pending restore_last_machine()
+        m_restore_plate_machine.clear();
         BOOST_LOG_TRIVIAL(info) << "set_selected_machine=" << dev_id
             << " cur_selected=" << selected_machine;
         auto my_machine_list = get_my_machine_list(get_current_printer_agent_id());
@@ -1187,9 +1189,29 @@ namespace Slic3r
         if (get_selected_machine())
             return;
 
-        const std::string last_machine = get_user_last_machine();
-        if (!last_machine.empty() && get_my_machine_list(get_current_printer_agent_id()).count(last_machine) != 0)
-            set_selected_machine(last_machine);
+        const std::string last_machine = m_restore_plate_machine.empty() ? get_user_last_machine() : m_restore_plate_machine;
+        if (!m_restore_plate_machine.empty() && wxTheApp) {
+            const auto* plate = GUI::selected_print_plate(GUI::wxGetApp().plater());
+            if (!plate || !plate->printer_profile().assigned() ||
+                plate->printer_profile().physical_printer_id != m_restore_plate_machine) {
+                m_restore_plate_machine.clear();
+                return;
+            }
+        }
+        auto machines = get_my_machine_list(get_current_printer_agent_id());
+        const auto found = machines.find(last_machine);
+        if (last_machine.empty() || found == machines.end() || !found->second)
+            return;
+        if (wxTheApp && get_current_printer_agent_id() == BBL_PRINTER_AGENT_ID) {
+            auto& app = GUI::wxGetApp();
+            const auto* plate = GUI::selected_print_plate(app.plater());
+            if (plate && plate->printer_profile().assigned() && app.preset_bundle) {
+                if (GUI::plate_device_compatibility(plate->printer_profile(), *app.preset_bundle, *found->second) ==
+                    GUI::PlateDeviceCompatibility::Incompatible)
+                    return;
+            }
+        }
+        set_selected_machine(last_machine);
     }
 
     void DeviceManager::restore_last_machine()
@@ -1197,6 +1219,14 @@ namespace Slic3r
         // A cloud printer is listed only once the account's machine list arrives, so until a list is
         // accepted (parse_user_print_info) or a selection is made, the restore stays pending.
         m_restore_last_machine = true;
+        m_restore_plate_machine.clear();
+        load_last_machine();
+    }
+
+    void DeviceManager::restore_plate_machine(const std::string& dev_id)
+    {
+        m_restore_last_machine = true;
+        m_restore_plate_machine = dev_id;
         load_last_machine();
     }
 

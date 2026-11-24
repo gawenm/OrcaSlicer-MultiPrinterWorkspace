@@ -24231,6 +24231,8 @@ static PlatePrinterProfile change_plate_machine(const PresetBundle& bundle, cons
     const auto bed_type = staged.printers.get_edited_preset().get_default_bed_type(&staged);
     staged.project_config.set_key_value("curr_bed_type", new ConfigOptionEnum<BedType>(bed_type));
     PlatePrinterProfile profile{staged.full_config(false), staged.is_bbl_vendor()};
+    if (current.assigned() && current.config.opt_string("printer_model") == profile.config.opt_string("printer_model"))
+        profile.physical_printer_id = current.physical_printer_id;
     profile.config.update_plugin_manifest();
     profile.remove_local_settings();
     return profile;
@@ -24526,6 +24528,8 @@ void Plater::update_plates_using_printer_preset(const std::string& previous_name
                 profile.config.set_key_value(key, value->clone());
         }
         profile.config.opt_string("printer_settings_id", true) = saved_name;
+        if (profile.config.opt_string("printer_model") != current.config.opt_string("printer_model"))
+            profile.physical_printer_id.clear();
         profile.config.update_plugin_manifest();
         profile.remove_local_settings();
         if (!profile.valid()) {
@@ -24555,6 +24559,31 @@ void Plater::update_plates_using_printer_preset(const std::string& previous_name
     mark_plate_toolbar_image_dirty();
     update();
     p->sidebar->refresh_plate_presets();
+}
+
+void Plater::set_plate_physical_printer(const std::string& device_id)
+{
+    auto* plate = selected_print_plate(this);
+    if (!plate || !plate->printer_profile().assigned())
+        return;
+
+    const auto project_printer = wxGetApp().preset_bundle->printers.get_edited_preset().name;
+    const auto row = plate->printer_profile().row_printer_name(project_printer);
+    const auto& plates = p->partplate_list.get_plate_list();
+    const bool needs_update = std::any_of(plates.begin(), plates.end(), [&](const PartPlate* member) {
+        return member->printer_profile().assigned() &&
+            member->printer_profile().row_printer_name(project_printer) == row &&
+            member->printer_profile().physical_printer_id != device_id;
+    });
+    if (!needs_update)
+        return;
+    take_snapshot(_u8L("Change plate printer"));
+    for (PartPlate* member : plates) {
+        if (member->printer_profile().assigned() &&
+            member->printer_profile().row_printer_name(project_printer) == row)
+            member->set_physical_printer_id(device_id);
+    }
+    set_plater_dirty(true);
 }
 
 void Plater::set_plate_preset(Preset::Type type, const std::string& name, size_t slot)

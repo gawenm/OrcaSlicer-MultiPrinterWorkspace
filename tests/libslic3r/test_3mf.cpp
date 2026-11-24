@@ -2951,6 +2951,7 @@ TEST_CASE("A project restores each plate's printer, process and G-code", "[3mf][
     };
     configure(bambu.printer_profile, "P1S", bambu_area, 0.4, 0.16, bambu_start, gcfMarlinLegacy);
     configure(klipper.printer_profile, "CR-30", klipper_area, 0.6, 0.28, klipper_start, gcfKlipper);
+    bambu.printer_profile.physical_printer_id = "test-p1s-device";
     klipper.printer_profile.config.set("belt_printer", true);
     const std::string filament_start = "; custom filament\nM117 PETG & ready\n";
     klipper.printer_profile.config.set_key_value("filament_start_gcode", new ConfigOptionStrings({filament_start}));
@@ -3000,6 +3001,7 @@ TEST_CASE("A project restores each plate's printer, process and G-code", "[3mf][
     CHECK(plates[0]->obj_inst_map.size() == 2);
     CHECK(plates[3]->printer_profile.config.opt_string("print_settings_id") == "P1S fine");
     CHECK(plates[3]->printer_profile.config.opt_bool("enable_support"));
+    CHECK(plates[3]->printer_profile.physical_printer_id == "test-p1s-device");
     CHECK(plates[4]->printer_profile.config.option<ConfigOptionStrings>("filament_settings_id")->values.front() == "Belt PETG");
     REQUIRE(loaded_config.has("printer_settings_id"));
     CHECK(loaded_config.opt_string("printer_settings_id") == "Project printer");
@@ -3012,6 +3014,8 @@ TEST_CASE("A project restores each plate's printer, process and G-code", "[3mf][
     REQUIRE(second.valid());
     CHECK(first.is_bambu);
     CHECK_FALSE(second.is_bambu);
+    CHECK(first.physical_printer_id == "test-p1s-device");
+    CHECK(second.physical_printer_id.empty());
     CHECK(first.config.opt_string("printer_settings_id") == "P1S");
     CHECK(second.config.opt_string("print_settings_id") == "CR-30 process");
     CHECK(first.config.opt_string("machine_start_gcode") == bambu_start);

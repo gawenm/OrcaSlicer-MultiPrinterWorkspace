@@ -4,6 +4,7 @@
 #include <wx/wxprec.h>
 
 #include "DeviceManager.hpp"
+#include "DeviceCore/DevConfigUtil.h"
 #include "PartPlate.hpp"
 #include "Plater.hpp"
 #include "libslic3r/Config.hpp"
@@ -49,6 +50,18 @@ inline std::string plate_printer_model_id(const DynamicPrintConfig& config, cons
                 if (printer.name == model->value)
                     return printer.model_id;
     return {};
+}
+
+enum class PlateDeviceCompatibility { Unknown, Compatible, Incompatible };
+
+inline PlateDeviceCompatibility plate_device_compatibility(const PlatePrinterProfile& profile,
+                                                            const PresetBundle& bundle, MachineObject& machine)
+{
+    const auto model = plate_printer_model_id(profile.config, bundle);
+    if (model.empty() || machine.printer_type.empty())
+        return PlateDeviceCompatibility::Unknown;
+    return DevPrinterConfigUtil::is_printer_model_compatible(model, machine) ?
+        PlateDeviceCompatibility::Compatible : PlateDeviceCompatibility::Incompatible;
 }
 
 inline DynamicPrintConfig* plate_print_host_config(const PlatePrinterProfile* profile, PresetBundle& bundle)

@@ -5,6 +5,7 @@
 #include "libslic3r/PresetBundle.hpp"
 #include "libslic3r/PrintConfig.hpp"
 #include "slic3r/GUI/PartPlate.hpp"
+#include "slic3r/GUI/DeviceManager.hpp"
 #include "slic3r/GUI/PlatePrintContext.hpp"
 
 using namespace Slic3r;
@@ -56,7 +57,9 @@ TEST_CASE("Inherited plates retain their project printer when a mixed workspace 
 TEST_CASE("Assigned plates use the installed printer preset for networking", "[printer_agent][plate]")
 {
     PresetBundle bundle;
-    bundle.vendors["BBL"].models.emplace_back().name = "Test Bambu";
+    auto& bambu_model = bundle.vendors["BBL"].models.emplace_back();
+    bambu_model.name = "Test Bambu";
+    bambu_model.model_id = "C11";
 
     const auto install = [&](const std::string& name, const std::string& model, const std::string& host) {
         auto config = bundle.printers.default_preset().config;
@@ -96,6 +99,15 @@ TEST_CASE("Assigned plates use the installed printer preset for networking", "[p
     bundle.printers.select_preset_by_name("Test Ender", true);
     auto& edited = bundle.printers.get_edited_preset().config;
     edited.opt_string("print_host", true) = "new-ender.example.test";
+    CHECK(plate_printer_agent_id(&bambu, bundle) == BBL_PRINTER_AGENT_ID);
+    CHECK(plate_printer_model_id(bambu.config, bundle) == "C11");
+    MachineObject selected(nullptr, nullptr, "Test", "test-device", "192.0.2.1");
+    selected.printer_type = "C11";
+    CHECK(plate_device_compatibility(bambu, bundle, selected) == PlateDeviceCompatibility::Compatible);
+    selected.printer_type = "test-belt-model";
+    CHECK(plate_device_compatibility(bambu, bundle, selected) == PlateDeviceCompatibility::Incompatible);
+    selected.printer_type.clear();
+    CHECK(plate_device_compatibility(bambu, bundle, selected) == PlateDeviceCompatibility::Unknown);
     CHECK(plate_print_host_device_id(*plate_print_host_config(&ender, bundle)) == "new-ender.example.test");
     CHECK(plate_print_host_device_id(*plate_print_host_config(&belt, bundle)) == "belt.example.test:7125");
 

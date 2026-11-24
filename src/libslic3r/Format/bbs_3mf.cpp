@@ -443,7 +443,8 @@ static std::string encode_plate_printer_profile(PlatePrinterProfile profile)
     nlohmann::json options = nlohmann::json::object();
     for (const auto& key : profile.config.keys())
         options[key] = profile.config.option(key)->serialize();
-    return nlohmann::json{{"bambu", profile.is_bambu}, {"config", std::move(options)}}.dump();
+    return nlohmann::json{{"bambu", profile.is_bambu}, {"config", std::move(options)},
+                          {"physical_printer_id", profile.physical_printer_id}}.dump();
 }
 
 static PlatePrinterProfile decode_plate_printer_profile(const std::string& value)
@@ -455,6 +456,7 @@ static PlatePrinterProfile decode_plate_printer_profile(const std::string& value
 
     PlatePrinterProfile profile;
     profile.is_bambu = data.at("bambu").get<bool>();
+    profile.physical_printer_id = data.value("physical_printer_id", std::string{});
     ConfigSubstitutionContext substitutions{ForwardCompatibilitySubstitutionRule::Disable};
     for (auto it = options.begin(); it != options.end(); ++it) {
         if (print_config_def.get(it.key()))

@@ -36,6 +36,7 @@ private:
 
     std::mutex listMutex;
     bool m_restore_last_machine{ false };                       /* see restore_last_machine() */
+    std::string m_restore_plate_machine;
     std::chrono::steady_clock::time_point m_lan_connect_started; /* the selected LAN machine's last connect */
     std::string selected_machine;                               /* dev_id */
     std::string local_selected_machine;                         /* dev_id */
@@ -93,6 +94,7 @@ public:
     // machines, else once an accepted cloud machine list holds it. Any selection, and logging out,
     // settle a pending restore.
     void restore_last_machine();
+    void restore_plate_machine(const std::string& dev_id);
     bool has_pending_last_machine_restore() const { return m_restore_last_machine; }
     void update_user_machine_list_info(const std::string& provider);
     void parse_user_print_info(std::string body);

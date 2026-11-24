@@ -2010,7 +2010,9 @@ void SelectMachineDialog::prepare(int print_plate_idx)
             if (plate->printer_profile().assigned()) {
                 m_plate_print_config = plate->build_print_config(bundle);
                 const auto* config = plate_print_host_config(plate, bundle);
-                if (config && m_plate_agent_id != BBL_PRINTER_AGENT_ID)
+                if (m_plate_agent_id == BBL_PRINTER_AGENT_ID)
+                    m_plate_device_id = plate->printer_profile().physical_printer_id;
+                else if (config)
                     m_plate_device_id = plate_print_host_device_id(*config);
             }
         }
@@ -3667,6 +3669,9 @@ void SelectMachineDialog::on_send_print()
         auto& bundle = *wxGetApp().preset_bundle;
         if (plate_printer_agent_id(plate, bundle) != m_plate_agent_id)
             return false;
+        if (plate->printer_profile().assigned() && m_plate_agent_id == BBL_PRINTER_AGENT_ID)
+            return plate->printer_profile().physical_printer_id == m_plate_device_id &&
+                (m_plate_device_id.empty() || obj_->get_dev_id() == m_plate_device_id);
         if (plate->printer_profile().assigned() && m_plate_agent_id != BBL_PRINTER_AGENT_ID) {
             const auto* config = plate_print_host_config(plate, bundle);
             return config && plate_print_host_device_id(*config) == m_plate_device_id &&
@@ -4187,15 +4192,36 @@ void SelectMachineDialog::update_user_printer()
 
     // update the machine list, and select a default machine
     _collect_sorted_machines(dev, m_list, print_model_id());
-    if (!m_plate_device_id.empty())
+    if (!m_plate_device_id.empty() && m_plate_agent_id != BBL_PRINTER_AGENT_ID)
         m_list.erase(std::remove_if(m_list.begin(), m_list.end(), [this](const MachineObject* machine) {
             return machine->get_dev_id() != m_plate_device_id;
         }), m_list.end());
     m_printer_box->SetPrinters(m_list);
     if (!m_list.empty())
     {
-        m_printer_last_select = m_list.front()->get_dev_id();
-        m_printer_box->GetPrinterComboBox()->SetSelection(0);
+        auto preferred = m_list.begin();
+        if (m_plate_agent_id == BBL_PRINTER_AGENT_ID && !m_plate_device_id.empty()) {
+            preferred = std::find_if(m_list.begin(), m_list.end(), [this](const MachineObject* machine) {
+                return machine->get_dev_id() == m_plate_device_id;
+            });
+            if (preferred == m_list.end()) {
+                m_printer_last_select.clear();
+                m_printer_box->GetPrinterComboBox()->SetSelection(wxNOT_FOUND);
+                m_printer_box->GetPrinterComboBox()->SetValue(_L("Select a printer"));
+                update_select_layout(nullptr);
+                return;
+            }
+        } else if (m_plate_agent_id == BBL_PRINTER_AGENT_ID) {
+            const auto model = print_model_id();
+            const auto compatible = std::find_if(m_list.begin(), m_list.end(), [&model](MachineObject* machine) {
+                return !model.empty() && !machine->printer_type.empty() &&
+                    DevPrinterConfigUtil::is_printer_model_compatible(model, *machine);
+            });
+            if (compatible != m_list.end())
+                preferred = compatible;
+        }
+        m_printer_last_select = (*preferred)->get_dev_id();
+        m_printer_box->GetPrinterComboBox()->SetSelection(int(preferred - m_list.begin()));
         wxCommandEvent event(wxEVT_COMBOBOX);
         event.SetEventObject(m_printer_box->GetPrinterComboBox());
         wxPostEvent(m_printer_box->GetPrinterComboBox(), event);
@@ -4397,10 +4423,18 @@ void SelectMachineDialog::on_selection_changed(wxCommandEvent &event)
     if (obj && !obj->get_lan_mode_connection_state()) {
         obj->command_get_version();
         obj->command_request_push_all();
-        if (!dev->get_selected_machine()) {
-            dev->set_selected_machine(m_printer_last_select);
-        }else if (dev->get_selected_machine()->get_dev_id() != m_printer_last_select) {
-            dev->set_selected_machine(m_printer_last_select);
+        if ((!dev->get_selected_machine() || dev->get_selected_machine()->get_dev_id() != m_printer_last_select) &&
+            !dev->set_selected_machine(m_printer_last_select))
+            return;
+
+        const auto* plate = selected_print_plate(m_plater);
+        if (m_plate_agent_id == BBL_PRINTER_AGENT_ID && plate && plate->id() == m_print_plate_id &&
+            plate->printer_profile().assigned()) {
+            if (plate_device_compatibility(plate->printer_profile(), *wxGetApp().preset_bundle, *obj) ==
+                PlateDeviceCompatibility::Compatible) {
+                m_plater->set_plate_physical_printer(m_printer_last_select);
+                m_plate_device_id = m_printer_last_select;
+            }
         }
 
         // Has changed machine unrecoverably
