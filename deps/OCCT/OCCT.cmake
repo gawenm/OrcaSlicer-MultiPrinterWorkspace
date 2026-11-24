@@ -5,6 +5,11 @@
 # with /Yu and /Fp. Combine the Windows short workspace path used by the workflows
 # with PCH disabled for OCCT only; leave other platforms' OCCT PCH unchanged.
 set(_occt_compiler_args "")
+# Windows MSVC builds have encountered C1083 (compiler-generated file) and C1001
+# (internal compiler error) while compiling OCCT with precompiled headers.
+# Disable OCCT PCH on Windows for the release-candidate diagnostic build.
+# This avoids relying on multi-GB compiler-generated PCH files; it may
+# increase compile time. Re-enable only after clean CI validation.
 set(_occt_pch ON)
 if (WIN32)
     set(_occt_pch OFF)
