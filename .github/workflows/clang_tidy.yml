@@ -122,15 +122,18 @@ jobs:
           path: ${{ github.workspace }}/deps/build/OrcaSlicer_dep
           key: ${{ steps.changes.outputs.deps-key }}
           restore-keys: linux-clang-cache-orcaslicer_deps-build-
-          fail-on-cache-miss: true
 
       - name: Warn about older deps
-        if: steps.newest_cache.outcome == 'success' && steps.newest_cache.outputs.cache-hit != 'true'
+        if: steps.newest_cache.outcome == 'success' && steps.newest_cache.outputs.cache-matched-key != '' && steps.newest_cache.outputs.cache-hit != 'true'
         run: echo "::warning title=Older deps::No cache matches this PR's deps/, so clang-tidy parsed against ${{ steps.newest_cache.outputs.cache-matched-key }}. If it reports errors in code that uses a dependency, rerun clang-tidy once the base branch's Build all has saved the new deps."
 
       - name: Apt-Install Dependencies
         if: steps.changes.outputs.cpp == 'true' && !vars.SELF_HOSTED
         uses: ./.github/actions/apt-install-deps
+
+      - name: Build missing dependencies
+        if: steps.changes.outputs.cpp == 'true' && steps.newest_cache.outcome == 'success' && steps.newest_cache.outputs.cache-matched-key == ''
+        run: ./build_linux.sh -drlL
 
       - name: Install clang-tidy
         if: steps.changes.outputs.cpp == 'true'
