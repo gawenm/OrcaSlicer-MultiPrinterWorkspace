@@ -1,8 +1,10 @@
 #include "Tab.hpp"
 #include "libslic3r/Model.hpp"
 #include "libslic3r/AppConfig.hpp"
+#include "libslic3r/PresetBundle.hpp"
 #include "slic3r/Utils/bambu_networking.hpp"
 #include "slic3r/Utils/NetworkAgent.hpp"
+#include "slic3r/Utils/NetworkAgentFactory.hpp"
 
 #include "slic3r/GUI/Monitor.hpp"
 #include "slic3r/GUI/Widgets/StateColor.hpp"
@@ -48,6 +50,7 @@
 #include "BindDialog.hpp"
 
 #include "DeviceCore/DevManager.h"
+#include "PlatePrintContext.hpp"
 
 #include <boost/log/trivial.hpp>
 #include "slic3r/GUI/DeviceCore/DevHMS.h"
@@ -325,6 +328,16 @@ void MonitorPanel::on_select_printer(wxCommandEvent& event)
                             << (dev->get_selected_machine() ? dev->get_selected_machine()->get_dev_id() : "<null>");
     if (!selected)
         return;
+
+    auto& app = wxGetApp();
+    const auto* plate = selected_print_plate(app.plater());
+    auto* machine = dev->get_selected_machine();
+    if (plate && plate->printer_profile().assigned() && app.preset_bundle && machine &&
+        plate_printer_agent_id(plate, *app.preset_bundle) == BBL_PRINTER_AGENT_ID) {
+        if (plate_device_compatibility(plate->printer_profile(), *app.preset_bundle, *machine) ==
+            PlateDeviceCompatibility::Compatible)
+            app.plater()->set_plate_physical_printer(requested_dev_id);
+    }
 
     set_default();
     update_all();

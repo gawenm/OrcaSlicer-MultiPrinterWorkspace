@@ -4,16 +4,41 @@
 #include <wx/wxprec.h>
 
 #include "DeviceManager.hpp"
+#include "DeviceCore/DevConfigUtil.h"
 #include "PartPlate.hpp"
 #include "Plater.hpp"
+#include "libslic3r/Config.hpp"
+#include "libslic3r/Format/bbs_3mf.hpp"
 #include "libslic3r/PresetBundle.hpp"
 #include "slic3r/Utils/NetworkAgentFactory.hpp"
+
+#include <utility>
+#include <vector>
 
 namespace Slic3r::GUI {
 
 inline PartPlate* selected_print_plate(Plater* plater)
 {
     return plater ? plater->get_partplate_list().get_selected_plate() : nullptr;
+}
+
+// Preserve the project printer when a workspace starts using plate printers.
+// Prepare all copies before changing any plate so allocation errors cannot
+// leave half of a row following a different printer.
+inline bool capture_inherited_plate_profiles(const std::vector<PartPlate*>& plates,
+                                             PlatePrinterProfile project_profile)
+{
+    if (!project_profile.valid())
+        return false;
+    project_profile.remove_local_settings();
+
+    std::vector<std::pair<PartPlate*, PlatePrinterProfile>> captures;
+    for (PartPlate* plate : plates)
+        if (plate && !plate->printer_profile().assigned())
+            captures.emplace_back(plate, project_profile);
+    for (auto& [plate, profile] : captures)
+        plate->set_printer_profile(std::move(profile), false);
+    return true;
 }
 
 inline std::string plate_printer_model_id(const DynamicPrintConfig& config, const PresetBundle& bundle)
@@ -25,6 +50,18 @@ inline std::string plate_printer_model_id(const DynamicPrintConfig& config, cons
                 if (printer.name == model->value)
                     return printer.model_id;
     return {};
+}
+
+enum class PlateDeviceCompatibility { Unknown, Compatible, Incompatible };
+
+inline PlateDeviceCompatibility plate_device_compatibility(const PlatePrinterProfile& profile,
+                                                            const PresetBundle& bundle, MachineObject& machine)
+{
+    const auto model = plate_printer_model_id(profile.config, bundle);
+    if (model.empty() || machine.printer_type.empty())
+        return PlateDeviceCompatibility::Unknown;
+    return DevPrinterConfigUtil::is_printer_model_compatible(model, machine) ?
+        PlateDeviceCompatibility::Compatible : PlateDeviceCompatibility::Incompatible;
 }
 
 inline DynamicPrintConfig* plate_print_host_config(const PlatePrinterProfile* profile, PresetBundle& bundle)
@@ -41,16 +78,25 @@ inline DynamicPrintConfig* plate_print_host_config(const PlatePrinterProfile* pr
     if (local == nullptr || local->name != name->value || local->is_external || local->is_project_embedded)
         return nullptr;
 
-    for (const char* key : {"printer_model", "printer_variant", "gcode_flavor", "nozzle_diameter",
-                            "printable_area", "printable_height", "belt_printer", "belt_printer_infinite_y",
-                            "belt_rotation_axis", "belt_angle"}) {
-        const ConfigOption* saved = profile->config.option(key);
-        const ConfigOption* installed = local->config.option(key);
-        if ((saved == nullptr) != (installed == nullptr) ||
-            (saved && (saved->type() != installed->type() || !(*saved == *installed))))
-            return nullptr;
-    }
-    return &local->config;
+    const auto matches_plate = [&](const DynamicPrintConfig& candidate) {
+        for (const char* key : {"printer_model", "printer_variant", "gcode_flavor", "nozzle_diameter",
+                                "printable_area", "printable_height", "belt_printer", "belt_printer_infinite_y",
+                                "belt_rotation_axis", "belt_angle"}) {
+            const ConfigOption* saved = profile->config.option(key);
+            const ConfigOption* option = candidate.option(key);
+            if ((saved == nullptr) != (option == nullptr) ||
+                (saved && (saved->type() != option->type() || !(*saved == *option))))
+                return false;
+        }
+        return true;
+    };
+
+    // A selected preset can have unsaved connection edits, but it may also
+    // have unsaved changes to the hardware. Resolve the connection only from a
+    // configuration that still matches the plate's captured hardware.
+    if (bundle.printers.get_selected_preset().name == local->name && matches_plate(edited.config))
+        return &edited.config;
+    return matches_plate(local->config) ? &local->config : nullptr;
 }
 
 inline DynamicPrintConfig* plate_print_host_config(const PartPlate* plate, PresetBundle& bundle)

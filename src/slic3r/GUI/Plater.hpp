@@ -644,6 +644,7 @@ public:
     void send_job_finished(wxCommandEvent& evt);
     void open_platesettings_dialog(wxCommandEvent& evt);
     void set_plate_bed_type(BedType type);
+    void set_plate_physical_printer(const std::string& device_id);
     void set_plate_preset(Preset::Type type, const std::string& name, size_t slot = 0);
     void update_plates_using_printer_preset(const std::string& previous_name, const std::string& saved_name);
     void set_plate_process_option(const std::string& key, const ConfigOption& value);

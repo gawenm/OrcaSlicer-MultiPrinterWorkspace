@@ -4386,6 +4386,22 @@ void GUI_App::switch_printer_agent()
     // Compare the registered IDs, not only the implementation pointer. Different registry IDs
     // may intentionally be backed by the same implementation object (especially for plugins).
     if (current_printer_agent && current_printer_agent->get_agent_info().id == effective_agent_id) {
+        if (assigned && effective_agent_id == BBL_PRINTER_AGENT_ID && m_device_manager) {
+            const auto device_id = plate->printer_profile().physical_printer_id;
+            MachineObject* selected = m_device_manager->get_selected_machine();
+            const bool incompatible = selected &&
+                plate_device_compatibility(plate->printer_profile(), *preset_bundle, *selected) ==
+                    PlateDeviceCompatibility::Incompatible;
+            if (selected && (incompatible || (!device_id.empty() && selected->get_dev_id() != device_id))) {
+                const auto last_machine = m_device_manager->get_user_last_machine();
+                m_device_manager->set_selected_machine("");
+                m_device_manager->record_user_last_machine(last_machine);
+                selected = nullptr;
+            }
+            if (!device_id.empty() && !selected) {
+                m_device_manager->restore_plate_machine(device_id);
+            }
+        }
         // Orca: the agent type is unchanged (e.g. switching between two Moonraker/Klipper
         // printer presets), so the selected machine and the agent's cached device_info still
         // point at the previously active printer preset. Re-select the machine when the new
@@ -4463,7 +4479,11 @@ void GUI_App::select_machine(const std::string& agent_id)
     // account's machine list arrives. Directly, not through the Device tab's selection flow, which
     // would also queue a nozzle sync for the next visit to Prepare.
     if (agent_id == BBL_PRINTER_AGENT_ID) {
-        m_device_manager->restore_last_machine();
+        const PartPlate* plate = selected_print_plate(plater());
+        if (plate && plate->printer_profile().assigned() && !plate->printer_profile().physical_printer_id.empty())
+            m_device_manager->restore_plate_machine(plate->printer_profile().physical_printer_id);
+        else
+            m_device_manager->restore_last_machine();
         return;
     }
 

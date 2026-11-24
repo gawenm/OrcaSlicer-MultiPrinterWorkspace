@@ -10383,6 +10383,16 @@ std::vector<size_t> Plater::priv::load_files(const std::vector<fs::path>& input_
 
                                 sync_loaded_project_filament_config(proj_cfg);
                             }
+                            // Older mixed projects may contain plates that inherited
+                            // the project printer. Capture it only after this project's
+                            // presets have been restored, before another selection can
+                            // change the global preset bundle.
+                            if (load_model && !published_config.published && partplate_list.has_printer_profiles()) {
+                                PlatePrinterProfile project_profile{preset_bundle->full_config(false),
+                                                                    preset_bundle->is_bbl_vendor()};
+                                if (!capture_inherited_plate_profiles(partplate_list.get_plate_list(), std::move(project_profile)))
+                                    BOOST_LOG_TRIVIAL(warning) << "Could not capture the project printer for inherited plates";
+                            }
                             // Update filament combobox after loading config
                             if (published_config.published) {
                                 q->update_filament_colors_in_full_config();
@@ -14603,11 +14613,15 @@ void Plater::priv::open_machine_select_dialog(int plate_idx, PrintFromType print
 {
     if (print_type == PrintFromType::FROM_NORMAL) {
         auto& app = wxGetApp();
-        app.switch_printer_agent();
         if (partplate_list.has_printer_profiles()) {
             PartPlate* plate = partplate_list.get_selected_plate();
             if (plate == nullptr || partplate_list.get_curr_plate_index() != plate_idx)
                 return;
+            if (!plate->printer_profile().assigned()) {
+                show_error(q, _L("Assign a printer to this plate before sending it."));
+                return;
+            }
+            app.switch_printer_agent();
             const std::string agent_id = plate_printer_agent_id(plate, *app.preset_bundle);
             const auto live_agent = app.getAgent() ? app.getAgent()->get_printer_agent() : nullptr;
             if (!live_agent || live_agent->get_agent_info().id != agent_id) {
@@ -14619,6 +14633,8 @@ void Plater::priv::open_machine_select_dialog(int plate_idx, PrintFromType print
                 show_error(q, _L("The Bambu printer model for this plate is unavailable. Install its printer preset."));
                 return;
             }
+        } else {
+            app.switch_printer_agent();
         }
     }
     // BBS
@@ -22005,6 +22021,10 @@ void Plater::send_gcode_legacy(int plate_idx, Export3mfProgressFn proFn)
         return;
     }
     PartPlate* plate = p->partplate_list.get_selected_plate();
+    if (mixed && (!plate || !plate->printer_profile().assigned())) {
+        show_error(this, _L("Assign a printer to this plate before sending it."));
+        return;
+    }
     const ObjectID plate_id = plate ? plate->id() : ObjectID{};
     const auto* local_config = plate_print_host_config(plate, *wxGetApp().preset_bundle);
     if (mixed && (local_config == nullptr || local_config->opt_string("print_host").empty())) {
@@ -24211,6 +24231,8 @@ static PlatePrinterProfile change_plate_machine(const PresetBundle& bundle, cons
     const auto bed_type = staged.printers.get_edited_preset().get_default_bed_type(&staged);
     staged.project_config.set_key_value("curr_bed_type", new ConfigOptionEnum<BedType>(bed_type));
     PlatePrinterProfile profile{staged.full_config(false), staged.is_bbl_vendor()};
+    if (current.assigned() && current.config.opt_string("printer_model") == profile.config.opt_string("printer_model"))
+        profile.physical_printer_id = current.physical_printer_id;
     profile.config.update_plugin_manifest();
     profile.remove_local_settings();
     return profile;
@@ -24343,8 +24365,27 @@ void Plater::open_platesettings_dialog(wxCommandEvent& evt) {
         return;
     }
 
+    const auto& plates = p->partplate_list.get_plate_list();
+    const bool remains_mixed = choice != 0 || std::any_of(plates.begin(), plates.end(),
+        [curr_plate](const PartPlate* plate) { return plate != curr_plate && plate->printer_profile().assigned(); });
+    const bool has_inherited = std::any_of(plates.begin(), plates.end(),
+        [](const PartPlate* plate) { return !plate->printer_profile().assigned(); });
+    PlatePrinterProfile project_profile;
+    if (remains_mixed && (has_inherited || choice == 0)) {
+        project_profile = {bundle.full_config(false), bundle.is_bbl_vendor()};
+        project_profile.remove_local_settings();
+        if (!project_profile.valid()) {
+            show_error(this, _L("The selected printer profile does not contain a complete FFF configuration."));
+            return;
+        }
+        if (choice == 0)
+            profile = project_profile;
+    }
+
     take_snapshot(_u8L("Change plate printer profile"));
     p->partplate_list.reload_all_objects();
+    if (remains_mixed && has_inherited)
+        capture_inherited_plate_profiles(plates, std::move(project_profile));
     curr_plate->set_printer_profile(std::move(profile));
     p->partplate_list.refresh_printer_profile_layout();
     set_plater_dirty(true);
@@ -24487,6 +24528,8 @@ void Plater::update_plates_using_printer_preset(const std::string& previous_name
                 profile.config.set_key_value(key, value->clone());
         }
         profile.config.opt_string("printer_settings_id", true) = saved_name;
+        if (profile.config.opt_string("printer_model") != current.config.opt_string("printer_model"))
+            profile.physical_printer_id.clear();
         profile.config.update_plugin_manifest();
         profile.remove_local_settings();
         if (!profile.valid()) {
@@ -24516,6 +24559,31 @@ void Plater::update_plates_using_printer_preset(const std::string& previous_name
     mark_plate_toolbar_image_dirty();
     update();
     p->sidebar->refresh_plate_presets();
+}
+
+void Plater::set_plate_physical_printer(const std::string& device_id)
+{
+    auto* plate = selected_print_plate(this);
+    if (!plate || !plate->printer_profile().assigned())
+        return;
+
+    const auto project_printer = wxGetApp().preset_bundle->printers.get_edited_preset().name;
+    const auto row = plate->printer_profile().row_printer_name(project_printer);
+    const auto& plates = p->partplate_list.get_plate_list();
+    const bool needs_update = std::any_of(plates.begin(), plates.end(), [&](const PartPlate* member) {
+        return member->printer_profile().assigned() &&
+            member->printer_profile().row_printer_name(project_printer) == row &&
+            member->printer_profile().physical_printer_id != device_id;
+    });
+    if (!needs_update)
+        return;
+    take_snapshot(_u8L("Change plate printer"));
+    for (PartPlate* member : plates) {
+        if (member->printer_profile().assigned() &&
+            member->printer_profile().row_printer_name(project_printer) == row)
+            member->set_physical_printer_id(device_id);
+    }
+    set_plater_dirty(true);
 }
 
 void Plater::set_plate_preset(Preset::Type type, const std::string& name, size_t slot)

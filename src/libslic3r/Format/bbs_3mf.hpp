@@ -81,6 +81,8 @@ struct PlatePrinterProfile
 {
     DynamicPrintConfig config;
     bool is_bambu = false;
+    // Identifier of the selected local or cloud device; credentials remain local.
+    std::string physical_printer_id{};
 
     bool assigned() const { return !config.empty(); }
     std::string row_printer_name(const std::string& project_printer) const
