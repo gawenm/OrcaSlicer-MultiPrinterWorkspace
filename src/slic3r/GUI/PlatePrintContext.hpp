@@ -7,6 +7,7 @@
 #include "PartPlate.hpp"
 #include "Plater.hpp"
 #include "libslic3r/Config.hpp"
+#include "libslic3r/Format/bbs_3mf.hpp"
 #include "libslic3r/PresetBundle.hpp"
 #include "slic3r/Utils/NetworkAgentFactory.hpp"
 
