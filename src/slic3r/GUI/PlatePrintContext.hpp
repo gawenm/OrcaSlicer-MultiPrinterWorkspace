@@ -6,6 +6,7 @@
 #include "DeviceManager.hpp"
 #include "PartPlate.hpp"
 #include "Plater.hpp"
+#include "libslic3r/Config.hpp"
 #include "libslic3r/PresetBundle.hpp"
 #include "slic3r/Utils/NetworkAgentFactory.hpp"
 
