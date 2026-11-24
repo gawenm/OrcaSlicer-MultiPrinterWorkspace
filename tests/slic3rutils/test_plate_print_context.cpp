@@ -130,3 +130,55 @@ TEST_CASE("Assigned plates use the installed printer preset for networking", "[p
     belt.config.opt_string("printer_settings_id", true) = "Unknown preset";
     CHECK(plate_print_host_config(&belt, bundle) == nullptr);
 }
+
+TEST_CASE("Assigned plate connection fails closed when installed hardware changes", "[printer_agent][plate]")
+{
+    PresetBundle bundle;
+    auto config = bundle.printers.default_preset().config;
+    config.opt_string("printer_settings_id", true) = "MPW hardware test";
+    config.opt_string("printer_model", true) = "Test Klipper";
+    config.opt_string("print_host", true) = "original.example.test";
+    config.opt_string("printer_agent", true) = MOONRAKER_PRINTER_AGENT_ID;
+    config.set_key_value("nozzle_diameter", new ConfigOptionFloats({0.4}));
+    config.set_key_value("printable_height", new ConfigOptionFloat(250.));
+    config.set_key_value("printable_area", new ConfigOptionPoints({{0, 0}, {220, 0}, {220, 220}, {0, 220}}));
+    config.set_key_value("belt_printer", new ConfigOptionBool(false));
+    bundle.printers.load_preset("", "MPW hardware test", std::move(config), false);
+    auto* local = bundle.printers.find_preset("MPW hardware test", false);
+    REQUIRE(local != nullptr);
+    PlatePrinterProfile plate{local->config, false};
+    plate.remove_local_settings();
+    bundle.printers.select_preset_by_name("MPW hardware test", true);
+
+    auto& edited = bundle.printers.get_edited_preset().config;
+    edited.opt_string("print_host", true) = "edited.example.test";
+    REQUIRE(plate_print_host_config(&plate, bundle) == &edited);
+
+    // An edited hardware preset must not override a captured plate. The
+    // matching installed preset remains an acceptable fallback until it too
+    // changes. Once neither matches, even an explicit agent must be rejected.
+    SECTION("Nozzle diameter") {
+        edited.set_key_value("nozzle_diameter", new ConfigOptionFloats({0.6}));
+        REQUIRE(plate_print_host_config(&plate, bundle) == &local->config);
+        local->config.set_key_value("nozzle_diameter", new ConfigOptionFloats({0.6}));
+    }
+    SECTION("Bed height") {
+        edited.set_key_value("printable_height", new ConfigOptionFloat(180.));
+        REQUIRE(plate_print_host_config(&plate, bundle) == &local->config);
+        local->config.set_key_value("printable_height", new ConfigOptionFloat(180.));
+    }
+    SECTION("Bed polygon") {
+        edited.set_key_value("printable_area", new ConfigOptionPoints({{0, 0}, {180, 0}, {180, 180}, {0, 180}}));
+        REQUIRE(plate_print_host_config(&plate, bundle) == &local->config);
+        local->config.set_key_value("printable_area", new ConfigOptionPoints({{0, 0}, {180, 0}, {180, 180}, {0, 180}}));
+    }
+    SECTION("Belt geometry") {
+        edited.set_key_value("belt_printer", new ConfigOptionBool(true));
+        REQUIRE(plate_print_host_config(&plate, bundle) == &local->config);
+        local->config.set_key_value("belt_printer", new ConfigOptionBool(true));
+    }
+    CHECK(plate_print_host_config(&plate, bundle) == nullptr);
+    CHECK(plate_printer_agent_id(&plate, bundle).empty());
+    REQUIRE(plate.config.option<ConfigOptionFloats>("nozzle_diameter") != nullptr);
+    CHECK(plate.config.option<ConfigOptionFloats>("nozzle_diameter")->values.front() == 0.4);
+}
