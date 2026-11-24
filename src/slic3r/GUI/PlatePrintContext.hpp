@@ -50,6 +50,11 @@ inline DynamicPrintConfig* plate_print_host_config(const PlatePrinterProfile* pr
             (saved && (saved->type() != installed->type() || !(*saved == *installed))))
             return nullptr;
     }
+    // The selected preset's connection may have unsaved edits. Keep using the
+    // installed preset to verify the plate identity, then use the live settings
+    // for its connection, just as the regular printer workflow does.
+    if (bundle.printers.get_selected_preset().name == local->name)
+        return &bundle.printers.get_edited_preset().config;
     return &local->config;
 }
 
