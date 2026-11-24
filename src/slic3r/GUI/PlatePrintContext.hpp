@@ -41,21 +41,25 @@ inline DynamicPrintConfig* plate_print_host_config(const PlatePrinterProfile* pr
     if (local == nullptr || local->name != name->value || local->is_external || local->is_project_embedded)
         return nullptr;
 
-    for (const char* key : {"printer_model", "printer_variant", "gcode_flavor", "nozzle_diameter",
-                            "printable_area", "printable_height", "belt_printer", "belt_printer_infinite_y",
-                            "belt_rotation_axis", "belt_angle"}) {
-        const ConfigOption* saved = profile->config.option(key);
-        const ConfigOption* installed = local->config.option(key);
-        if ((saved == nullptr) != (installed == nullptr) ||
-            (saved && (saved->type() != installed->type() || !(*saved == *installed))))
-            return nullptr;
-    }
-    // The selected preset's connection may have unsaved edits. Keep using the
-    // installed preset to verify the plate identity, then use the live settings
-    // for its connection, just as the regular printer workflow does.
-    if (bundle.printers.get_selected_preset().name == local->name)
-        return &bundle.printers.get_edited_preset().config;
-    return &local->config;
+    const auto matches_plate = [&](const DynamicPrintConfig& candidate) {
+        for (const char* key : {"printer_model", "printer_variant", "gcode_flavor", "nozzle_diameter",
+                                "printable_area", "printable_height", "belt_printer", "belt_printer_infinite_y",
+                                "belt_rotation_axis", "belt_angle"}) {
+            const ConfigOption* saved = profile->config.option(key);
+            const ConfigOption* option = candidate.option(key);
+            if ((saved == nullptr) != (option == nullptr) ||
+                (saved && (saved->type() != option->type() || !(*saved == *option))))
+                return false;
+        }
+        return true;
+    };
+
+    // A selected preset can have unsaved connection edits, but it may also
+    // have unsaved changes to the hardware. Resolve the connection only from a
+    // configuration that still matches the plate's captured hardware.
+    if (bundle.printers.get_selected_preset().name == local->name && matches_plate(edited.config))
+        return &edited.config;
+    return matches_plate(local->config) ? &local->config : nullptr;
 }
 
 inline DynamicPrintConfig* plate_print_host_config(const PartPlate* plate, PresetBundle& bundle)

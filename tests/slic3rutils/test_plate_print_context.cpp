@@ -51,6 +51,14 @@ TEST_CASE("Assigned plates use the installed printer preset for networking", "[p
     CHECK(plate_print_host_device_id(*plate_print_host_config(&ender, bundle)) == "new-ender.example.test");
     CHECK(plate_print_host_device_id(*plate_print_host_config(&belt, bundle)) == "belt.example.test:7125");
 
+    edited.opt_string("printer_model", true) = "Test Bambu";
+    REQUIRE(plate_print_host_config(&ender, bundle) != nullptr);
+    CHECK(plate_print_host_device_id(*plate_print_host_config(&ender, bundle)) == "ender.example.test");
+    CHECK(plate_printer_agent_id(&ender, bundle) == MOONRAKER_PRINTER_AGENT_ID);
+    CHECK(plate_print_host_device_id(*plate_print_host_config(&belt, bundle)) == "belt.example.test:7125");
+    edited.opt_string("printer_model", true) = "Test Klipper";
+    CHECK(plate_print_host_device_id(*plate_print_host_config(&ender, bundle)) == "new-ender.example.test");
+
     auto* bambu_host_config = plate_print_host_config(&bambu, bundle);
     REQUIRE(bambu_host_config != nullptr);
     bambu_host_config->set_key_value("bbl_use_printhost", new ConfigOptionBool(true));
