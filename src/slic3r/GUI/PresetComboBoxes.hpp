@@ -217,6 +217,7 @@ public:
     void show_edit_menu();
 
     wxString get_preset_name(const Preset& preset) override;
+    void populate_presets(const std::vector<std::string>* plate_names, const std::string& current);
     void update() override;
     void msw_rescale() override;
     void OnSelect(wxCommandEvent& evt) override;
