@@ -74,7 +74,9 @@ inline DynamicPrintConfig* plate_print_host_config(const PlatePrinterProfile* pr
     const auto* name = profile->config.option<ConfigOptionString>("printer_settings_id");
     if (name == nullptr || name->value.empty())
         return nullptr;
-    Preset* local = bundle.printers.find_preset(name->value, false);
+    // The default lookup returns the edited copy for the selected preset.
+    // Fetch the installed preset explicitly so hardware-safe fallback is independent.
+    Preset* local = bundle.printers.find_preset(name->value, false, true);
     if (local == nullptr || local->name != name->value || local->is_external || local->is_project_embedded)
         return nullptr;
 
