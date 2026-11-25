@@ -188,3 +188,23 @@ TEST_CASE("Assigned plate connection fails closed when installed hardware change
         check_rejected();
     }
 }
+
+TEST_CASE("Unbound plate only auto-selects a unique compatible physical printer", "[printer_agent][plate]")
+{
+    MachineObject p1s_a(nullptr, nullptr, "P1S A", "p1s-a", "192.0.2.1");
+    MachineObject p1s_b(nullptr, nullptr, "P1S B", "p1s-b", "192.0.2.2");
+    MachineObject other(nullptr, nullptr, "Other", "other", "192.0.2.3");
+    MachineObject unknown(nullptr, nullptr, "Unknown", "unknown", "192.0.2.4");
+    p1s_a.printer_type = "C11";
+    p1s_b.printer_type = "C11";
+    other.printer_type = "test-incompatible-model";
+    unknown.printer_type.clear();
+
+    CHECK(unique_compatible_plate_device("C11", {}) == nullptr);
+    CHECK(unique_compatible_plate_device("", {&p1s_a}) == nullptr);
+    CHECK(unique_compatible_plate_device("C11", {&other, &unknown, nullptr}) == nullptr);
+    CHECK(unique_compatible_plate_device("C11", {&other, &p1s_a, &unknown, nullptr}) == &p1s_a);
+    CHECK(unique_compatible_plate_device("C11", {&p1s_b, &other}) == &p1s_b);
+    CHECK(unique_compatible_plate_device("C11", {&p1s_a, &p1s_b}) == nullptr);
+    CHECK(unique_compatible_plate_device("C11", {&p1s_b, &p1s_a}) == nullptr);
+}
