@@ -64,6 +64,26 @@ inline PlateDeviceCompatibility plate_device_compatibility(const PlatePrinterPro
         PlateDeviceCompatibility::Compatible : PlateDeviceCompatibility::Incompatible;
 }
 
+// An unbound mixed-workspace plate may auto-select only an unambiguous,
+// known-compatible Bambu device. Unknown or multiple compatible machines
+// require explicit user selection; list ordering is not printer identity.
+inline MachineObject* unique_compatible_plate_device(const std::string& model_id,
+                                                     const std::vector<MachineObject*>& machines)
+{
+    if (model_id.empty())
+        return nullptr;
+    MachineObject* match = nullptr;
+    for (auto* machine : machines) {
+        if (!machine || machine->printer_type.empty() ||
+            !DevPrinterConfigUtil::is_printer_model_compatible(model_id, *machine))
+            continue;
+        if (match && match != machine)
+            return nullptr;
+        match = machine;
+    }
+    return match;
+}
+
 inline DynamicPrintConfig* plate_print_host_config(const PlatePrinterProfile* profile, PresetBundle& bundle)
 {
     auto& edited = bundle.printers.get_edited_preset();
