@@ -4409,8 +4409,12 @@ void SelectMachineDialog::on_selection_changed(wxCommandEvent &event)
             if (m_list[i]->is_lan_mode_printer() && !m_list[i]->has_access_right()) {
                 ConnectPrinterDialog dlg(wxGetApp().mainframe, wxID_ANY, _L("Input access code"));
                 dlg.set_machine_object(m_list[i]);
-                if (dlg.ShowModal() != wxID_OK) {
-                    // Cancelling access-code entry must not select or bind this printer.
+                const auto requested_id = m_list[i]->get_dev_id();
+                const auto result = dlg.ShowModal();
+                // A printer list refresh can change the selected row during the modal loop.
+                const int current = m_printer_box->GetPrinterComboBox()->GetSelection();
+                if (result != wxID_OK || current < 0 || static_cast<size_t>(current) >= m_list.size() ||
+                    m_list[current]->get_dev_id() != requested_id) {
                     m_printer_last_select.clear();
                     m_printer_box->GetPrinterComboBox()->SetSelection(wxNOT_FOUND);
                     m_printer_box->GetPrinterComboBox()->SetValue(_L("Select a printer"));
@@ -4418,6 +4422,7 @@ void SelectMachineDialog::on_selection_changed(wxCommandEvent &event)
                     update_select_layout(nullptr);
                     return;
                 }
+                i = current;
             }
 
             m_printer_last_select = m_list[i]->get_dev_id();
