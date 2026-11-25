@@ -1679,8 +1679,8 @@ void MainFrame::show_device() {
     const bool assigned = plate && plate->printer_profile().assigned();
     const auto agent_id = assigned ? plate_printer_agent_id(plate, bundle) : std::string{};
     const bool use_bambu_device_tab = assigned ? agent_id == BBL_PRINTER_AGENT_ID : bundle.use_bbl_device_tab();
-    const bool use_printer_agents = assigned ? !agent_id.empty() && agent_id != ORCA_PRINTER_AGENT_ID && !use_bambu_device_tab :
-        app.app_config->get_bool("use_printer_agents");
+    const bool use_printer_agents = app.app_config->get_bool("use_printer_agents") &&
+        (!assigned || (!agent_id.empty() && agent_id != ORCA_PRINTER_AGENT_ID && !use_bambu_device_tab));
     const bool should_use_native = use_bambu_device_tab || use_printer_agents;
 
     // The web Device page is the extra tab printer-agents mode shows alongside the native one.
