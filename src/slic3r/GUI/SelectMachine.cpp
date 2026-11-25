@@ -4214,13 +4214,15 @@ void SelectMachineDialog::update_user_printer()
                 return;
             }
         } else if (m_plate_agent_id == BBL_PRINTER_AGENT_ID) {
-            const auto model = print_model_id();
-            const auto compatible = std::find_if(m_list.begin(), m_list.end(), [&model](MachineObject* machine) {
-                return !model.empty() && !machine->printer_type.empty() &&
-                    DevPrinterConfigUtil::is_printer_model_compatible(model, *machine);
-            });
-            if (compatible != m_list.end())
-                preferred = compatible;
+            auto* compatible = unique_compatible_plate_device(print_model_id(), m_list);
+            if (!compatible) {
+                m_printer_last_select.clear();
+                m_printer_box->GetPrinterComboBox()->SetSelection(wxNOT_FOUND);
+                m_printer_box->GetPrinterComboBox()->SetValue(_L("Select a printer"));
+                update_select_layout(nullptr);
+                return;
+            }
+            preferred = std::find(m_list.begin(), m_list.end(), compatible);
         }
         m_printer_last_select = (*preferred)->get_dev_id();
         m_printer_box->GetPrinterComboBox()->SetSelection(int(preferred - m_list.begin()));
