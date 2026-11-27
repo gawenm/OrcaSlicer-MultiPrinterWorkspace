@@ -862,6 +862,38 @@ jobs:
           git clone --depth 1 https://github.com/OrcaSlicer/orca-test-repo.git "$test_repo_dir"
           python3 "$test_repo_dir/run_test.py" "${{ github.workspace }}/build/package/bin/orca-slicer"
 
+      # RequiresApp tests need the compiled slicer and are deliberately excluded
+      # from the artifact-only unit-test runner. Run them on the build host.
+      - name: Run native CLI regression tests
+        if: runner.os == 'Linux'
+        timeout-minutes: 60
+        shell: bash
+        run: |
+          set -euo pipefail
+          ctest --test-dir build/tests -C Release -L RequiresApp --no-tests=error --output-on-failure --output-junit "$GITHUB_WORKSPACE/native-cli-results.xml"
+          python3 - <<'PY'
+          import xml.etree.ElementTree as ET
+          root = ET.parse("native-cli-results.xml").getroot()
+          cases = list(root.iter("testcase"))
+          if not cases:
+              raise SystemExit("No native CLI tests executed")
+          skipped = [c.get("name") for c in cases if c.find("skipped") is not None or c.get("status") in ("notrun", "skipped")]
+          if skipped:
+              raise SystemExit("Native CLI tests skipped: " + ", ".join(skipped))
+          print(f"All {len(cases)} native CLI test groups executed.")
+          PY
+
+      - name: Upload native CLI test results
+        if: ${{ !cancelled() && runner.os == 'Linux' }}
+        uses: actions/upload-artifact@v7
+        with:
+          name: native-cli-results-linux-${{ inputs.arch || 'x86_64' }}
+          path: |
+            native-cli-results.xml
+            build/tests/Testing/Temporary/LastTest.log
+          if-no-files-found: warn
+          retention-days: 14
+
       - name: Build orca_custom_preset_tests
         if: github.ref == 'refs/heads/main' && runner.os == 'Linux' && !vars.SELF_HOSTED && inputs.arch != 'aarch64'
         working-directory: ${{ github.workspace }}/build/src/Release

@@ -798,12 +798,12 @@ namespace Slic3r
             }
         }
 
-        if (selected_machine != dev_id) {
-            OnSelectedMachineChanged(selected_machine, dev_id);
-        }
-
+        const auto previous_machine = selected_machine;
         selected_machine = dev_id;
         record_user_last_machine(selected_machine);
+        if (previous_machine != selected_machine) {
+            OnSelectedMachineChanged(previous_machine, selected_machine);
+        }
         BOOST_LOG_TRIVIAL(trace) << "Orca diagnostic: DeviceManager selection complete selected_machine="
                                 << selected_machine;
         return true;
@@ -811,17 +811,18 @@ namespace Slic3r
 
     MachineObject* DeviceManager::get_selected_machine()
     {
-        if (selected_machine.empty()) return nullptr;
+        const auto agent_id = get_current_printer_agent_id();
+        if (selected_machine.empty() || agent_id.empty()) return nullptr;
 
         MachineObject* obj = get_user_machine(selected_machine, GUI::wxGetApp().get_printer_cloud_provider());
-        if (obj)
+        if (obj && obj->printer_agent_id == agent_id)
             return obj;
 
-        // return local machine has access code
+        // Never expose a cached machine owned by another printer agent.
         auto it = localMachineList.find(selected_machine);
         if (it != localMachineList.end())
         {
-            if (it->second->has_access_right())
+            if (it->second && it->second->printer_agent_id == agent_id && it->second->has_access_right())
                 return it->second;
         }
         return nullptr;

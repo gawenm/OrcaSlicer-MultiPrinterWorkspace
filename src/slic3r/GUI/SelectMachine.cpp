@@ -4214,13 +4214,15 @@ void SelectMachineDialog::update_user_printer()
                 return;
             }
         } else if (m_plate_agent_id == BBL_PRINTER_AGENT_ID) {
-            const auto model = print_model_id();
-            const auto compatible = std::find_if(m_list.begin(), m_list.end(), [&model](MachineObject* machine) {
-                return !model.empty() && !machine->printer_type.empty() &&
-                    DevPrinterConfigUtil::is_printer_model_compatible(model, *machine);
-            });
-            if (compatible != m_list.end())
-                preferred = compatible;
+            auto* compatible = unique_compatible_plate_device(print_model_id(), m_list);
+            if (!compatible) {
+                m_printer_last_select.clear();
+                m_printer_box->GetPrinterComboBox()->SetSelection(wxNOT_FOUND);
+                m_printer_box->GetPrinterComboBox()->SetValue(_L("Select a printer"));
+                update_select_layout(nullptr);
+                return;
+            }
+            preferred = std::find(m_list.begin(), m_list.end(), compatible);
         }
         m_printer_last_select = (*preferred)->get_dev_id();
         m_printer_box->GetPrinterComboBox()->SetSelection(int(preferred - m_list.begin()));
@@ -4407,11 +4409,20 @@ void SelectMachineDialog::on_selection_changed(wxCommandEvent &event)
             if (m_list[i]->is_lan_mode_printer() && !m_list[i]->has_access_right()) {
                 ConnectPrinterDialog dlg(wxGetApp().mainframe, wxID_ANY, _L("Input access code"));
                 dlg.set_machine_object(m_list[i]);
-                auto res = dlg.ShowModal();
-                m_printer_last_select = "";
-                m_printer_box->GetPrinterComboBox()->SetSelection(-1);
-                m_printer_box->GetPrinterComboBox()->Refresh();
-                m_printer_box->GetPrinterComboBox()->Update();
+                const auto requested_id = m_list[i]->get_dev_id();
+                const auto result = dlg.ShowModal();
+                // A printer list refresh can change the selected row during the modal loop.
+                const int current = m_printer_box->GetPrinterComboBox()->GetSelection();
+                if (result != wxID_OK || current < 0 || static_cast<size_t>(current) >= m_list.size() ||
+                    m_list[current]->get_dev_id() != requested_id) {
+                    m_printer_last_select.clear();
+                    m_printer_box->GetPrinterComboBox()->SetSelection(wxNOT_FOUND);
+                    m_printer_box->GetPrinterComboBox()->SetValue(_L("Select a printer"));
+                    Enable_Send_Button(false);
+                    update_select_layout(nullptr);
+                    return;
+                }
+                i = current;
             }
 
             m_printer_last_select = m_list[i]->get_dev_id();

@@ -217,6 +217,7 @@ public:
     void show_edit_menu();
 
     wxString get_preset_name(const Preset& preset) override;
+    void populate_presets(const std::vector<std::string>* plate_names, const std::string& current);
     void update() override;
     void msw_rescale() override;
     void OnSelect(wxCommandEvent& evt) override;
@@ -224,6 +225,8 @@ public:
     void set_sync_badge(bool show);
 
     FilamentColor get_cur_color_info();
+    void pick_filament_color(const DynamicPrintConfig& config, const std::string& preset_name,
+                             std::function<void(const std::vector<std::string>&, bool)> apply);
     void show_default_color_picker();
     void sync_colour_config(const std::vector<std::string> &clrs, bool is_gradient);
     void sys_color_changed() override;

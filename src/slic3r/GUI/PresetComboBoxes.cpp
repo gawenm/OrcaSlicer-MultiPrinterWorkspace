@@ -445,8 +445,14 @@ void PresetComboBox::set_plate_choices(const std::vector<std::string>& names, co
 {
     GetDropDown().Hide();
     wxWindowUpdateLocker lock(this);
-    Clear();
     m_select_plate_preset = std::move(on_select);
+    if (m_type == Preset::TYPE_FILAMENT) {
+        if (auto* sidebar_combo = dynamic_cast<PlaterPresetComboBox*>(this)) {
+            sidebar_combo->populate_presets(&names, current);
+            return;
+        }
+    }
+    Clear();
     int selected = wxNOT_FOUND;
     auto add_preset = [&](const std::string& name) {
         const auto* installed = m_collection->find_preset(name, false);
@@ -974,59 +980,12 @@ PlaterPresetComboBox::PlaterPresetComboBox(wxWindow *parent, Preset::Type preset
         RemoveButtonBorder(clr_picker);
 #endif
         clr_picker->Bind(wxEVT_BUTTON, [this](wxCommandEvent& e) {
-            // Check if it's an official filament
-            auto fila_type = Preset::remove_suffix_modified(GetValue().ToUTF8().data());
-            bool is_official = boost::algorithm::starts_with(fila_type, "Bambu");
-            if (is_official) {
-                // Get filament_id from filament_presets. FilamentPickerDialog looks up
-                // filaments_color_codes.json, which is downloaded from Bambu and keyed by the
-                // printer's own ids, so translate our OF id (the "GFA00" fallback is already one).
-                const std::string& preset_name = m_preset_bundle->filament_presets[m_filament_idx];
-                const Preset* selected_preset = m_collection->find_preset(preset_name);
-                auto* agent = wxGetApp().getAgent();
-                wxString fila_id = "GFA00";
-                if (selected_preset)
-                    fila_id = wxString::FromUTF8(agent ? agent->from_orca_filament_id(selected_preset->filament_id) : selected_preset->filament_id);
-                FilamentColor fila_color = get_cur_color_info();
-
-                // Show filament picker dialog
-                FilamentPickerDialog dialog(this, fila_id, fila_color, fila_type,
-                    filament_color_picker_value(m_preset_bundle->project_config, m_filament_idx));
-
-                if (!dialog.IsDataLoaded()) {
-                    // If FilamentPicker fails, fallback to default color picker
-                    show_default_color_picker();
-                } else if (dialog.ShowModal() == wxID_OK && dialog.HasSelectionChanged()) {
-                    if (const auto& custom = dialog.GetCustomColorSelection()) {
-                        const auto value = filament_color_picker_result(*custom);
-                        sync_colour_config(value.colors, value.gradient);
-                    } else {
-                        // Get selected filament color data
-                        FilamentColor fila_color = dialog.GetSelectedFilamentColor();
-
-                        // Check if we have valid color data
-                        if (!fila_color.m_colors.empty()) {
-                            // Convert to storage format
-                            std::vector<std::string> colors;
-                            for (const wxColour& color : fila_color.m_colors) {
-                                colors.push_back(color.GetAsString(wxC2S_HTML_SYNTAX).ToStdString());
-                            }
-
-                            bool is_gradient = (fila_color.m_color_type == FilamentColor::ColorType::GRADIENT_CLR);
-                            this->sync_colour_config(colors, is_gradient);
-                        } else {
-                            // Fallback to basic color if no FilamentColor data
-                            wxColour selected_color = dialog.GetSelectedColour();
-                            if (selected_color.IsOk()) {
-                                std::vector<std::string> color = {selected_color.GetAsString(wxC2S_HTML_SYNTAX).ToStdString()};
-                                this->sync_colour_config(color, false);
-                            }
-                        }
-                    }
-                }
-            } else {
-                show_default_color_picker();
-            }
+            if (has_plate_choices())
+                return; // Assigned slots handle this button with their own saved configuration.
+            if (m_filament_idx < 0 || size_t(m_filament_idx) >= m_preset_bundle->filament_presets.size())
+                return;
+            pick_filament_color(m_preset_bundle->project_config, m_preset_bundle->filament_presets[m_filament_idx],
+                [this](const std::vector<std::string>& colors, bool gradient) { sync_colour_config(colors, gradient); });
             wxCommandEvent *evt = new wxCommandEvent(EVT_FILAMENT_COLOR_CHANGED);
             evt->SetInt(m_filament_idx);
             wxQueueEvent(wxGetApp().plater(), evt);
@@ -1072,10 +1031,9 @@ static void run_wizard(StartPage sp)
 
 void PlaterPresetComboBox::OnSelect(wxCommandEvent &evt)
 {
-    if (select_plate_choice(evt))
-        return;
-
     auto selected_item = evt.GetSelection();
+    if (selected_item < 0 || static_cast<size_t>(selected_item) >= GetCount())
+        return;
 
     auto marker = reinterpret_cast<Marker>(this->GetClientData(selected_item));
     if (marker >= LABEL_ITEM_DISABLED && marker < LABEL_ITEM_MAX) {
@@ -1099,6 +1057,8 @@ void PlaterPresetComboBox::OnSelect(wxCommandEvent &evt)
             }
             wxTheApp->CallAfter([sp]() { run_wizard(sp); });
         //}
+        return;
+    } else if (select_plate_choice(evt)) {
         return;
     } else if (marker == LABEL_ITEM_PHYSICAL_PRINTER ||  selected_item >= 0 || m_collection->current_is_dirty()) {
         m_last_selected = selected_item;
@@ -1240,7 +1200,12 @@ void PlaterPresetComboBox::update()
     if (has_plate_choices())
         return;
 
-    if (m_type == Preset::TYPE_FILAMENT &&
+    populate_presets(nullptr, {});
+}
+
+void PlaterPresetComboBox::populate_presets(const std::vector<std::string>* plate_names, const std::string& current)
+{
+    if (!plate_names && m_type == Preset::TYPE_FILAMENT &&
         (m_preset_bundle->printers.get_edited_preset().printer_technology() == ptSLA ||
         m_preset_bundle->filament_presets.size() <= (size_t)m_filament_idx) )
         return;
@@ -1251,7 +1216,7 @@ void PlaterPresetComboBox::update()
     invalidate_selection();
 
     const Preset* selected_filament_preset = nullptr;
-    if (m_type == Preset::TYPE_FILAMENT)
+    if (!plate_names && m_type == Preset::TYPE_FILAMENT)
     {
         // The slot can lie past the colour arrays: it still lists its presets, with a blank swatch.
         std::vector<wxBitmap *> bitmaps = get_extruder_color_icons(true);
@@ -1303,10 +1268,16 @@ void PlaterPresetComboBox::update()
     /*if (!presets.front().is_visible)
         this->set_label_marker(this->Append(separator(L("System presets")), wxNullBitmap));*/
 
+    std::unordered_set<std::string> allowed;
+    if (plate_names)
+        allowed.insert(plate_names->begin(), plate_names->end());
     for (size_t i = presets.front().is_visible ? 0 : m_collection->num_default_presets(); i < presets.size(); ++i)
     {
         const Preset& preset = presets[i];
-        bool is_selected =  m_type == Preset::TYPE_FILAMENT ?
+        if (plate_names && preset.name != current && !allowed.count(preset.name))
+            continue;
+        const bool compatible = plate_names || preset.is_compatible;
+        bool is_selected = plate_names ? preset.name == current : m_type == Preset::TYPE_FILAMENT ?
                             m_preset_bundle->filament_presets[m_filament_idx] == preset.name :
                             // The case, when some physical printer is selected
                             m_type == Preset::TYPE_PRINTER && m_preset_bundle->physical_printers.has_selection() ? false :
@@ -1316,7 +1287,7 @@ void PlaterPresetComboBox::update()
         {
             continue;
         }
-        else if (is_selected && !preset.is_visible)
+        else if (!plate_names && is_selected && !preset.is_visible)
         {
             Preset& selected_preset = const_cast<Preset&>(preset);
             selected_preset.is_visible = true;
@@ -1351,9 +1322,9 @@ void PlaterPresetComboBox::update()
 #endif
             // ORCA allow caching vendor and type values for all presets instead just system ones
             // if (preset.is_system) { 
-                if (!preset.is_compatible && preset_filament_vendors.count(name) > 0)
+                if (!compatible && preset_filament_vendors.count(name) > 0)
                     continue;
-                else if (preset.is_compatible && preset_filament_vendors.count(name) > 0)
+                else if (compatible && preset_filament_vendors.count(name) > 0)
                     uncompatible_presets.erase(name);
                 preset_filament_vendors[name] = preset.config.option<ConfigOptionStrings>("filament_vendor")->values.at(0);
                 if (preset_filament_vendors[name] == "Bambu Lab")
@@ -1366,7 +1337,7 @@ void PlaterPresetComboBox::update()
 
         preset_descriptions.emplace(name, from_u8(preset.description));
 
-        if (!preset.is_compatible) {
+        if (!compatible) {
             if (boost::ends_with(name, " template"))
                 continue;
             uncompatible_presets.emplace(name, bmp);
@@ -1452,7 +1423,8 @@ void PlaterPresetComboBox::update()
         wxString selected_full = selected_user_preset.empty() ? selected_system_preset : selected_user_preset;
         auto     alias_it      = preset_aliases.find(selected_full);
         wxString selected_alias = alias_it != preset_aliases.end() ? from_u8(alias_it->second) : selected_full;
-        selected_in_ams = add_ams_filaments(into_u8(selected_alias), true);
+        if (!plate_names)
+            selected_in_ams = add_ams_filaments(into_u8(selected_alias), true);
     }
 
     std::vector<wxString> filament_orders = {"Bambu PLA Basic", "Bambu PLA Matte", "Bambu PETG HF",    "Bambu ABS",      "Bambu PLA Silk", "Bambu PLA-CF",
@@ -1612,9 +1584,16 @@ void PlaterPresetComboBox::update()
         }
     }
 
-    update_selection();
+    if (plate_names && m_last_selected == INT_MAX) {
+        m_last_selected = current.empty() ? wxNOT_FOUND : Append(from_u8(current));
+        if (m_last_selected != wxNOT_FOUND)
+            SetItemAlias(m_last_selected, from_u8(current));
+        SetSelection(m_last_selected);
+    } else {
+        update_selection();
+    }
     if (m_type == Preset::TYPE_FILAMENT) {
-        if (wxGetApp().plater()->is_same_printer_for_connected_and_selected(false)) {
+        if (!plate_names && wxGetApp().plater()->is_same_printer_for_connected_and_selected(false)) {
             update_badge_according_flag();
         }
     }
@@ -1681,6 +1660,75 @@ FilamentColor PlaterPresetComboBox::get_cur_color_info()
 
     fila_color.EndSet(filament_color_type[m_filament_idx] == "0" ? 0 : 1);
     return fila_color;
+}
+
+void PlaterPresetComboBox::pick_filament_color(const DynamicPrintConfig& config, const std::string& preset_name,
+                                              std::function<void(const std::vector<std::string>&, bool)> apply)
+{
+    const auto value = filament_color_picker_value(config, m_filament_idx);
+    auto pick_custom = [&] {
+        const auto initial = filament_color_picker_initial(value);
+        ColorPickerDialog dialog(this, initial, {true, true}, !filament_color_picker_selection(value), clr_picker);
+        if (dialog.ShowModal() == wxID_OK && filament_color_picker_changed(initial, dialog.selection())) {
+            const auto result = filament_color_picker_result(*dialog.selection());
+            apply(result.colors, result.gradient);
+        }
+    };
+    // Check if it's an official filament
+    auto fila_type = Preset::remove_suffix_modified(GetValue().ToUTF8().data());
+    bool is_official = boost::algorithm::starts_with(fila_type, "Bambu");
+    if (is_official) {
+        // Get filament_id from filament_presets. FilamentPickerDialog looks up
+        // filaments_color_codes.json, which is downloaded from Bambu and keyed by the
+        // printer's own ids, so translate our OF id (the "GFA00" fallback is already one).
+        const Preset* selected_preset = m_collection->find_preset(preset_name);
+        auto* agent = wxGetApp().getAgent();
+        wxString fila_id = "GFA00";
+        if (selected_preset)
+            fila_id = wxString::FromUTF8(agent ? agent->from_orca_filament_id(selected_preset->filament_id) : selected_preset->filament_id);
+        FilamentColor fila_color;
+        for (const auto& color : value.colors)
+            fila_color.m_colors.insert(wxColour(from_u8(color)));
+        fila_color.EndSet(value.gradient ? 0 : 1);
+
+        // Show filament picker dialog
+        FilamentPickerDialog dialog(this, fila_id, fila_color, fila_type,
+            value);
+
+        if (!dialog.IsDataLoaded()) {
+            // If FilamentPicker fails, fallback to default color picker
+            pick_custom();
+        } else if (dialog.ShowModal() == wxID_OK && dialog.HasSelectionChanged()) {
+            if (const auto& custom = dialog.GetCustomColorSelection()) {
+                const auto value = filament_color_picker_result(*custom);
+                apply(value.colors, value.gradient);
+            } else {
+                // Get selected filament color data
+                FilamentColor fila_color = dialog.GetSelectedFilamentColor();
+
+                // Check if we have valid color data
+                if (!fila_color.m_colors.empty()) {
+                    // Convert to storage format
+                    std::vector<std::string> colors;
+                    for (const wxColour& color : fila_color.m_colors) {
+                        colors.push_back(color.GetAsString(wxC2S_HTML_SYNTAX).ToStdString());
+                    }
+
+                    bool is_gradient = (fila_color.m_color_type == FilamentColor::ColorType::GRADIENT_CLR);
+                    apply(colors, is_gradient);
+                } else {
+                    // Fallback to basic color if no FilamentColor data
+                    wxColour selected_color = dialog.GetSelectedColour();
+                    if (selected_color.IsOk()) {
+                        std::vector<std::string> color = {selected_color.GetAsString(wxC2S_HTML_SYNTAX).ToStdString()};
+                        apply(color, false);
+                    }
+                }
+            }
+        }
+    } else {
+        pick_custom();
+    }
 }
 
 void PlaterPresetComboBox::show_default_color_picker()

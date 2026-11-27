@@ -3770,6 +3770,38 @@ void Sidebar::init_filament_combo(PlaterPresetComboBox **combo, int filament_idx
 {
     *combo = new PlaterPresetComboBox(p->m_panel_filament_content, Slic3r::Preset::TYPE_FILAMENT);
     (*combo)->set_filament_idx(filament_idx);
+    if (plate_local) {
+        auto* control = *combo;
+        control->clr_picker->Bind(wxEVT_BUTTON, [this, control, slot = size_t(filament_idx)](wxCommandEvent&) {
+            auto* plate = selected_print_plate(p->plater);
+            if (!plate || !plate->printer_profile().assigned())
+                return;
+            const auto& config = plate->printer_profile().config;
+            const auto* names = config.option<ConfigOptionStrings>("filament_settings_id");
+            const std::string name = names && slot < names->values.size() ? names->values[slot] : std::string{};
+            control->pick_filament_color(config, name, [this, id = plate->id(), slot](const auto& colors, bool gradient) {
+                auto* current = selected_print_plate(p->plater);
+                if (!current || current->id() != id || !current->printer_profile().assigned() || colors.empty())
+                    return;
+                auto profile = current->printer_profile();
+                auto* primary = profile.config.option<ConfigOptionStrings>("filament_colour");
+                if (!primary || slot >= primary->values.size())
+                    return;
+                primary->values[slot] = colors.front();
+                auto& pack = profile.config.option<ConfigOptionStrings>("filament_multi_colour", true)->values;
+                auto& mode = profile.config.option<ConfigOptionStrings>("filament_colour_type", true)->values;
+                if (pack.size() <= slot) pack.resize(slot + 1);
+                if (mode.size() <= slot) mode.resize(slot + 1, "1");
+                pack[slot] = boost::algorithm::join(colors, " ");
+                mode[slot] = gradient ? "0" : "1";
+                p->plater->take_snapshot(_u8L("Change filament color"));
+                current->set_printer_profile(std::move(profile), false);
+                p->plater->set_plater_dirty(true);
+                p->plater->update();
+                refresh_plate_presets();
+            });
+        });
+    }
     auto* columns = plate_local ? p->sizer_plate_filaments : p->sizer_filaments;
 
     auto combo_and_btn_sizer = new wxBoxSizer(wxHORIZONTAL);
@@ -4238,7 +4270,7 @@ void Sidebar::refresh_plate_presets(bool preset_catalog_changed)
                                  change_preset(Preset::TYPE_FILAMENT, slot));
         combo->edit_btn->Enable(can_select && named);
         combo->edit_btn->SetBitmap_("edit");
-        combo->clr_picker->Enable(false);
+        combo->clr_picker->Enable(colors && slot < colors->values.size());
         combo->set_sync_badge(false);
         const int icon_size = 2 * wxGetApp().em_unit();
         const auto number = std::to_string(slot + 1);

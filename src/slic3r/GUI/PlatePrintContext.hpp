@@ -64,6 +64,26 @@ inline PlateDeviceCompatibility plate_device_compatibility(const PlatePrinterPro
         PlateDeviceCompatibility::Compatible : PlateDeviceCompatibility::Incompatible;
 }
 
+// An unbound mixed-workspace plate may auto-select only an unambiguous,
+// known-compatible Bambu device. Unknown or multiple compatible machines
+// require explicit user selection; list ordering is not printer identity.
+inline MachineObject* unique_compatible_plate_device(const std::string& model_id,
+                                                     const std::vector<MachineObject*>& machines)
+{
+    if (model_id.empty())
+        return nullptr;
+    MachineObject* match = nullptr;
+    for (auto* machine : machines) {
+        if (!machine || machine->printer_type.empty() ||
+            !DevPrinterConfigUtil::is_printer_model_compatible(model_id, *machine))
+            continue;
+        if (match && match != machine)
+            return nullptr;
+        match = machine;
+    }
+    return match;
+}
+
 inline DynamicPrintConfig* plate_print_host_config(const PlatePrinterProfile* profile, PresetBundle& bundle)
 {
     auto& edited = bundle.printers.get_edited_preset();
@@ -74,7 +94,9 @@ inline DynamicPrintConfig* plate_print_host_config(const PlatePrinterProfile* pr
     const auto* name = profile->config.option<ConfigOptionString>("printer_settings_id");
     if (name == nullptr || name->value.empty())
         return nullptr;
-    Preset* local = bundle.printers.find_preset(name->value, false);
+    // The default lookup returns the edited copy for the selected preset.
+    // Fetch the installed preset explicitly so hardware-safe fallback is independent.
+    Preset* local = bundle.printers.find_preset(name->value, false, true);
     if (local == nullptr || local->name != name->value || local->is_external || local->is_project_embedded)
         return nullptr;
 
